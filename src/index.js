@@ -1,6 +1,7 @@
 // Entry point: sign in (solving the one-time human check if needed), then run the
 // automation loop and the Telegram control panel.
 import 'dotenv/config';
+import fs from 'node:fs';
 import path from 'node:path';
 import { PawsClient, ApiError } from './api.js';
 import { Game } from './game.js';
@@ -15,6 +16,22 @@ if (!process.env.PRIVATE_KEY) {
   console.error('PRIVATE_KEY kosong di .env');
   process.exit(1);
 }
+
+// One bot per data folder: two copies would double every action and fight over Telegram updates.
+const lockFile = path.join(dataDir, 'bot.lock');
+fs.mkdirSync(dataDir, { recursive: true });
+try {
+  const pid = Number(fs.readFileSync(lockFile, 'utf8'));
+  if (pid && pid !== process.pid) {
+    process.kill(pid, 0); // throws if that process is gone
+    console.error(`Bot sudah jalan (pid ${pid}). Tutup dulu yang lama, atau hapus data/bot.lock kalau yakin tidak jalan.`);
+    process.exit(1);
+  }
+} catch {}
+fs.writeFileSync(lockFile, String(process.pid));
+const releaseLock = () => { try { if (Number(fs.readFileSync(lockFile, 'utf8')) === process.pid) fs.unlinkSync(lockFile); } catch {} };
+process.on('exit', releaseLock);
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => process.exit(0));
 
 const client = new PawsClient({ privateKey: process.env.PRIVATE_KEY, dataDir });
 console.log(`Paws bot · wallet ${client.address}`);

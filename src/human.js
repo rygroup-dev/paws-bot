@@ -14,6 +14,10 @@ const BROWSERS = [
   'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
   'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+  `${process.env.LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe`,
+  '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/usr/bin/microsoft-edge', '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/snap/bin/chromium',
 ];
 const PORT = 9333;
 const PAGE_URL = 'https://pawsofsherwood.com/bot-human-check';
@@ -37,7 +41,7 @@ async function listTabs() {
 
 export async function getHumanToken(siteKey, log = console.log) {
   const exe = BROWSERS.find((p) => fs.existsSync(p));
-  if (!exe) throw new Error('Edge/Chrome not found');
+  if (!exe) throw new Error('Akun baru butuh captcha sekali, tapi Edge/Chrome tidak ditemukan di mesin ini. Jalankan "run human" di PC yang ada browser-nya, lalu salin folder data/ ke sini.');
   const proc = spawn(exe, [
     `--remote-debugging-port=${PORT}`,
     `--user-data-dir=${path.resolve('data', 'browser-profile')}`,

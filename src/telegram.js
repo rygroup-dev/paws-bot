@@ -16,6 +16,19 @@ const ELIG_TEXT = {
   REWARDS_HOLD: () => 'reward ditahan',
   SECURITY_HOLD: () => 'security hold',
 };
+// Blocker codes returned by the server (quotes, permits, recruitment), worded from the game's own map.
+const BLOCK_TEXT = {
+  INSUFFICIENT_CAT: 'PAWS kurang', INSUFFICIENT_RESOURCES: 'resource kurang (kerjakan stasiun penghasilnya)',
+  NOT_ENOUGH_FRAGMENTS: 'fragment belum cukup', CAT_BUSY: 'kucing sedang kerja', WORKING: 'kucing masih ada shift/harvest',
+  UPGRADING: 'kucing sedang persiapan upgrade', UPGRADE_IN_PROGRESS: 'upgrade sedang berjalan', CAT_LISTED: 'kucing sedang dijual',
+  LISTED: 'kucing sedang dijual', IN_TRADE: 'kucing ada di trade', ACCLIMATING: 'kucing masih aklimasi', NAPPING: 'kucing sedang tidur',
+  XP_NOT_MET: 'XP belum cukup (kerja shift dulu)', LEVEL_CAP: 'sudah level maksimal', STARTER_LEVEL: 'naikkan level starter cat dulu',
+  TUTORIAL_INCOMPLETE: 'tutorial belum sampai Tavern', PERMIT_LIMIT: 'kantor permit penuh', STATION_SLOTS_FULL: 'slot stasiun penuh (simpan stasiun / perluas lahan)',
+  CAT_CAPACITY_FULL: 'roster penuh', RECRUITMENT_IN_PROGRESS: 'rekrut sedang berjalan', CRAFT_IN_PROGRESS: 'craft sedang berjalan',
+  ACTIVE_CATS_LIMIT: 'batas kucing aktif tier ini', PLOT_TOO_SMALL: 'lahan terlalu kecil', STARTER_CAT: 'starter cat terikat akun',
+  PROTECTED: 'lepas protect dulu', RELEASE_COOLDOWN: 'kucing baru datang', ALREADY_RELEASED: 'sudah di-release', TARGET_DISABLED: 'target tidak tersedia',
+};
+const blockers = (list) => (list ?? []).map((b) => BLOCK_TEXT[b] ?? b).join(', ');
 const SHIFT_MODES =['auto', '10', '30', '60', '120', '240', '480'];
 const NOTIFY_MODES = ['important', 'all', 'off'];
 
@@ -70,6 +83,18 @@ export class TelegramUI {
   }
 
   start() {
+    this.call('setMyCommands', { commands: [
+      { command: 'menu', description: 'Dashboard' },
+      { command: 'cats', description: 'Kucing' },
+      { command: 'market', description: 'Marketplace' },
+      { command: 'wallet', description: 'Wallet, beli & deposit PAWS' },
+      { command: 'rewards', description: 'Reward & eligibility' },
+      { command: 'referral', description: 'Referral' },
+      { command: 'log', description: 'Log aktivitas' },
+      { command: 'pause', description: 'Matikan otomatis' },
+      { command: 'resume', description: 'Nyalakan otomatis' },
+      { command: 'help', description: 'Panduan tombol' },
+    ] }).catch(() => {});
     const poll = async () => {
       try {
         const ups = await this.call('getUpdates', { offset: this.offset, timeout: 50, allowed_updates: ['message', 'callback_query'] });
@@ -123,6 +148,10 @@ export class TelegramUI {
     if (cmd === '/log') return this.show(this.logScreen);
     if (cmd === '/cats') return this.show(this.catsScreen);
     if (cmd === '/market') return this.show(this.marketScreen);
+    if (cmd === '/wallet') return this.show(this.walletScreen);
+    if (cmd === '/reward' || cmd === '/rewards') return this.show(this.rewardsScreen);
+    if (cmd === '/referral') return this.show(this.referralScreen);
+    if (cmd === '/help') return this.show(this.helpScreen);
     await this.show(this.home);
   }
 
@@ -164,10 +193,30 @@ export class TelegramUI {
     };
   }
 
+  // Reward eligibility as a checklist with real progress (GET /rewards + /jobs?status=CLAIMED).
+  async eligibilityChecklist(rw) {
+    const el = rw.eligibility;
+    const ru = el.rules;
+    const has = (r) => el.reasons.includes(r);
+    const me = this.state().me;
+    const maxLvl = Math.max(0, ...(this.state().cats ?? []).map((c) => c.level));
+    const claimed = await this.g.jobs('CLAIMED').then((r) => r.jobs.filter((j) => j.snapshot?.rewardEligible && n(j.result?.gamePoints) > 0).length).catch(() => null);
+    const line = (ok, text) => `${ok ? '✅' : '❌'} ${text}`;
+    const rows = [
+      line(!has('TUTORIAL_INCOMPLETE') && me?.user?.tutorialCompleted !== false, 'Tutorial selesai'),
+      line(!has('CAT_LEVEL_TOO_LOW'), `Kucing level ${ru.minCatLevel}+ (tertinggi L${maxLvl})`),
+      line(!has('NOT_ENOUGH_ACTIVITY'), `${ru.minClaimedJobs} shift penghasil poin diklaim${claimed !== null ? ` (${Math.min(claimed, ru.minClaimedJobs)}/${ru.minClaimedJobs})` : ''} — shift ≥10 menit di stasiun 🎁; shift 3 menit tutorial tidak dihitung`),
+      line(!has('NO_SPEND_OR_STAKE'), `Belanja/stake ${num(ru.minSpendOrDeposit)} $PAWS milikmu — Wallet → Beli PAWS lalu level up/stake`),
+    ];
+    if (ru.minAccountAgeHours) rows.push(line(!has('ACCOUNT_TOO_NEW'), `Akun minimal ${ru.minAccountAgeHours} jam`));
+    for (const r of el.reasons.filter((x) => !['TUTORIAL_INCOMPLETE', 'CAT_LEVEL_TOO_LOW', 'NOT_ENOUGH_ACTIVITY', 'NO_SPEND_OR_STAKE', 'ACCOUNT_TOO_NEW'].includes(x))) rows.push(line(false, ELIG_TEXT[r]?.(ru) ?? r));
+    return `${el.eligible ? '✅ <b>Eligible reward</b>' : '⛔ <b>Belum eligible reward</b>'}\n${rows.join('\n')}`;
+  }
+
   takeFlash() {
     const f = this.flash;
     this.flash = null;
-    return f ? `${f}\n\n` : '';
+    return f ? `${esc(f)}\n\n` : '';
   }
 
   nav(...extra) {
@@ -222,7 +271,9 @@ ${elig}
         [this.btn('🐱 Kucing', () => this.catsScreen), this.btn('🏗 Bangunan', () => this.buildingsScreen), this.btn('⏱ Shift', () => this.jobsScreen)],
         [this.btn('🎁 Reward', () => this.rewardsScreen), this.btn('🛒 Market', () => this.marketScreen), this.btn('👛 Wallet', () => this.walletScreen)],
         [this.btn('📜 Permit & Rekrut', () => this.permitScreen), this.btn('🎓 Tutorial', () => this.tutorialScreen), this.btn('🏆 Leaderboard', () => this.leaderScreen)],
+        [this.btn('👑 Membership', () => this.membershipScreen), this.btn('🤝 Referral', () => this.referralScreen), this.btn('🔒 Stake', () => this.stakeScreen)],
         [this.btn('⚙️ Setting', () => this.settingsScreen), this.btn('📋 Log', () => this.logScreen), this.btn('💡 Strategi Cuan', () => this.strategyScreen)],
+        [this.btn('❓ Bantuan', () => this.helpScreen)],
       ],
     };
   }
@@ -257,7 +308,7 @@ Status: ${ACT_ICON[c.activity] ?? c.activity}${job ? ` di ${esc(job.buildingType
       const rows = [];
       if (c.activity === 'IDLE') rows.push([ui.btn('⛏ Suruh kerja', () => ui.pickBuilding(id)), ui.btn('😴 Rest gratis', ui.doThen(`${c.name} istirahat`, () => ui.g.rest(id), ui.catScreen(id)))]);
       if (c.activity === 'IDLE' && qn) rows.push([ui.btn(`💤 Quick nap (${num(qn.catCost)} PAWS)`, ui.confirm(`Quick nap ${esc(c.name)} seharga ${num(qn.catCost)} $PAWS?`, 'Quick nap', () => ui.g.nap(id, qn.catCost), ui.catScreen(id)))]);
-      if (c.canAttemptUpgrade) rows.push([ui.btn('📈 Level up', () => ui.levelUpScreen(id))]);
+      rows.push([ui.btn(`📈 Level up ${c.canAttemptUpgrade ? '(siap!)' : `(XP ${c.xp}/${c.xpToNext})`}`, () => ui.levelUpScreen(id))]);
       rows.push([
         ui.btn(c.isMain ? '⭐ Main cat' : '⭐ Jadikan main', ui.doThen('Main cat diganti', () => ui.g.setMain(id), ui.catScreen(id))),
         ui.btn(c.isProtected ? '🛡 Lepas protect' : '🛡 Protect', ui.doThen('Protect diubah', () => ui.g.protect(id, !c.isProtected), ui.catScreen(id))),
@@ -312,7 +363,13 @@ Status: ${ACT_ICON[c.activity] ?? c.activity}${job ? ` di ${esc(job.buildingType
       const q = await ui.g.upgradeQuote(catId, 0);
       const rows = q.stops.map((s) => [ui.btn(`${s.chanceBps / 100}% · ${num(s.catCost)} PAWS`, ui.confirm(`Level up ke L${q.targetLevel} dengan peluang ${s.chanceBps / 100}% biaya ${num(s.catCost)} $PAWS + ${esc(JSON.stringify(q.costs.resources))}?`, 'Level up dimulai', () => ui.g.startUpgrade(catId, s.chanceBps / 100, s.catCost), ui.catScreen(catId)))]);
       return {
-        text: `📈 <b>Level up L${q.currentLevel} → L${q.targetLevel}</b>\nXP ${q.xp.current}/${q.xp.required} · resource ${esc(JSON.stringify(q.costs.resources))}\nBisa: ${q.canUpgrade ? '✅' : `⛔ ${esc(q.blockers.join(', '))}`}\nGagal = PAWS hangus, level & XP aman.\nProduksi/jam: ${q.gain?.at?.perHour?.now ?? '-'} → ${q.gain?.at?.perHour?.after ?? '-'}`,
+        text: `📈 <b>Level up L${q.currentLevel} → L${q.targetLevel}</b>
+XP ${bar(q.xp.current, q.xp.required)} ${q.xp.current}/${q.xp.required} (kucing dapat ${ui.e.cfg.xp.perHour} XP/jam kerja)
+Biaya: ${num(q.costs.catCost)} PAWS + ${esc(Object.entries(q.costs.resources).map(([k, v]) => `${v} ${k}`).join(', '))} · persiapan ${dur(q.prepSeconds)}
+Peluang dasar ${q.chance.baseBps / 100}% (bisa dinaikkan sampai 100% dengan biaya lebih)
+Bisa sekarang: ${q.canUpgrade ? '✅' : `⛔ ${esc(blockers(q.blockers))}`}
+Gagal = PAWS hangus, level &amp; XP aman. Auto level up: ${ui.s.get('autoLevelUp') ? 'ON' : 'OFF'}${ui.s.get('levelUpSpendPaws') ? ' (boleh bayar PAWS)' : ' (hanya yang gratis)'}
+Produksi/jam: ${q.gain?.at?.perHour?.now ?? '-'} → ${q.gain?.at?.perHour?.after ?? '-'}${q.gain?.at?.points ? ` · poin/jam ${q.gain.at.points.perHour.now} → ${q.gain.at.points.perHour.after}` : ''}`,
         kb: ui.nav(...(q.canUpgrade ? rows : []), [ui.btn('⬅️ Kembali', () => ui.catScreen(catId))]),
       };
     };
@@ -352,8 +409,12 @@ Status: ${ACT_ICON[c.activity] ?? c.activity}${job ? ` di ${esc(job.buildingType
     const nt = p.nextTier;
     const lines = p.buildings.map((b) => `• <b>${esc(b.name)}</b> L${b.level} ${b.deployed ? '' : '📦'} · ${Math.round(b.condition)}% · ${b.activeJobs}/${b.slots} slot${b.producesResource ? ` · ${RES_ICON[b.producesResource] ?? ''}` : ''}${b.rewardSymbol ? ` · 🎁${b.rewardSymbol} ${b.gamePointsPerHour}pts/j` : ''}${b.status !== 'ACTIVE' ? ` · ${b.status} ${b.secondsRemaining ? dur(b.secondsRemaining) : ''}` : ''}`);
     const req = nt?.requirements?.items?.filter((i) => !i.met).map((i) => `${i.label} ${num(i.have)}/${num(i.need)}`).join(', ');
+    const plan = this.e.growPlan().slice(0, 3).map((x, i) => `${i + 1}. ${esc(x.name)} – ${num(x.cost)} PAWS ${x.ready ? '✅' : '⏳'}`).join('\n');
+    const freeSlots = (p.activeCats?.limit ?? 0) - (this.state().cats?.length ?? 0);
     return {
-      text: `${this.takeFlash()}🏗 <b>Bangunan</b> · ${esc(p.name)} ${p.size}x${p.size}\n${lines.join('\n')}\n\n🏡 Perluas ke <b>${esc(nt?.name ?? '-')}</b>: ${nt ? (nt.requirements.met ? '✅ bisa' : `⛔ ${esc(req)}`) : 'maks'}`,
+      text: `${this.takeFlash()}🏗 <b>Bangunan</b> · ${esc(p.name)} ${p.size}x${p.size}\n${lines.join('\n')}\n\n🏡 Perluas ke <b>${esc(nt?.name ?? '-')}</b>: ${nt ? (nt.requirements.met ? '✅ bisa' : `⛔ ${esc(req)}`) : 'maks'}
+🐱 Slot kucing kosong: <b>${Math.max(0, freeSlots)}</b>${freeSlots > 0 ? ' (beli kucing di Market = poin bertambah paling besar)' : ''}
+🎯 <b>Target Auto Grow</b> (${this.s.get('autoUpgradeBuildings') ? 'ON' : 'OFF'}):\n${plan || '-'}`,
       kb: this.nav(
         ...p.buildings.map((b) => [this.btn(`${b.name} L${b.level}`, () => this.buildingScreen(b.id))]),
         ...(nt?.requirements?.met ? [[this.btn(`🏡 Perluas lahan (${num(nt.catCost)} PAWS)`, this.confirm(`Perluas ke ${esc(nt.name)} seharga ${num(nt.catCost)} $PAWS + resource?`, 'Perluasan dimulai', () => this.g.expand(nt.catCost), this.buildingsScreen))]] : []),
@@ -425,8 +486,7 @@ ${nl?.unlocks ? `Buka: ${esc(nl.unlocks.join(', '))}` : ''}`;
     const el = rw.eligibility;
     return {
       text: `${this.takeFlash()}🎁 <b>Reward ronde #${rw.currentEpoch.epochNumber}</b> · sisa ${until(rw.currentEpoch.endsAt, now)}
-${el.eligible ? '✅ Kamu eligible' : `⛔ Belum eligible: ${esc(el.reasons.join(', '))}`}
-<i>Syarat: tutorial selesai, kucing L${el.rules.minCatLevel}+, ${el.rules.minClaimedJobs} shift diklaim, belanja/deposit/stake ${num(el.rules.minSpendOrDeposit)} PAWS</i>
+${await this.eligibilityChecklist(rw)}
 
 ${pools}
 🐾 <b>$PAWS pool</b>: ${num(cp?.myPoints)} / ${num(cp?.totalPoints, 0)} pts · total ${num(cp?.amount, 0)} PAWS · share ${cp?.estimatedSharePct ?? '-'}%
@@ -449,9 +509,10 @@ ${rw.membership?.available ? `👑 Membership ${num(rw.membership.price)} ${rw.m
     const fl = Object.entries(floor.byRarity).map(([k, v]) => `${RARITY_ICON[k]} ${k}: <b>${v ? num(v) : '-'}</b>`).join('\n');
     const myl = (mine.listings ?? []).map((l) => `• ${esc(l.cat?.name)} ${l.cat?.rarity} @ ${num(l.price)} ${l.status}`).join('\n');
     return {
-      text: `${this.takeFlash()}🛒 <b>Marketplace</b> · ${floor.activeListings} listing · fee ${floor.feeBps / 100}%\n\n<b>Floor per rarity</b>\n${fl}\n\n<b>Listing saya</b>\n${myl || '-'}\n💰 Saldo: ${num(this.state().me.balances.cat)} PAWS`,
+      text: `${this.takeFlash()}🛒 <b>Marketplace</b> · ${floor.activeListings} listing · fee ${floor.feeBps / 100}%\n<i>Market game ini menjual kucing. $PAWS dibeli di Wallet → Beli PAWS, permit di Permit Office.</i>\n\n<b>Floor per rarity</b>\n${fl}\n\n<b>Floor per profesi</b>\n${Object.entries(floor.byProfession).map(([k, v]) => `${esc(k)}: ${v ? num(v) : '-'}`).join(' · ')}\n\n<b>Listing saya</b>\n${myl || '-'}\n💰 Saldo: ${num(this.state().me.balances.cat)} PAWS`,
       kb: this.nav(
-        [this.btn('🔍 Termurah', () => this.browse({ sort: 'price_asc' })), this.btn('🆕 Terbaru', () => this.browse({ sort: 'newest' })), this.btn('💪 Stat tertinggi', () => this.browse({ sort: 'stats_desc' }))],
+        [this.btn('🔍 Semua listing (filter)', () => this.browse({ sort: 'price_asc' }))],
+        [this.btn('💸 Termurah', () => this.browse({ sort: 'price_asc' })), this.btn('🆕 Terbaru', () => this.browse({ sort: 'newest' })), this.btn('💪 Stat tertinggi', () => this.browse({ sort: 'stats_desc' }))],
         ['COMMON', 'UNCOMMON', 'RARE', 'EPIC', 'LEGENDARY', 'MYTHIC'].map((r) => this.btn(RARITY_ICON[r], () => this.browse({ sort: 'price_asc', rarity: r }))),
         [this.btn('💲 Jual kucing', () => this.catsScreen), this.btn('📈 Penjualan terakhir', () => this.recentSales)],
         ...(mine.listings ?? []).filter((l) => l.status === 'ACTIVE').map((l) => [this.btn(`🏷️ Batal jual ${l.cat?.name} (${num(l.price)})`, this.doThen('Listing dibatalkan', () => this.g.cancelListing(l.id), this.marketScreen))]),
@@ -459,16 +520,34 @@ ${rw.membership?.available ? `👑 Membership ${num(rw.membership.price)} ${rw.m
     };
   }
 
+  // Marketplace browser. Server filters (verified): sort, rarity, profession, minLevel, q, page, limit.
   browse(params) {
     const ui = this;
+    const PER = 8;
     return async function br() {
-      ui.panelScreen = ui.browse(params);
-      const r = await ui.g.market({ ...params, limit: 10 });
-      const ls = (r.listings ?? []).slice(0, 10);
-      const lines = ls.map((l, i) => `${i + 1}. ${RARITY_ICON[l.cat.rarity]} <b>${esc(l.cat.name)}</b> ${l.cat.profession} L${l.cat.level} · p${l.cat.stats.productivity}/e${l.cat.stats.efficiency}/l${l.cat.stats.luck}/n${l.cat.stats.endurance}${l.cat.traits?.length ? ` · ${l.cat.traits.map((t) => esc(t.name)).join(',')}` : ''}\n    💰 <b>${num(l.price)}</b> PAWS · ${esc(l.sellerUsername)}`);
+      const p = { sort: 'price_asc', page: 1, ...params };
+      ui.panelScreen = ui.browse(p);
+      const r = await ui.g.market({ ...p, limit: PER });
+      const ls = r.listings ?? [];
+      const pages = Math.max(1, Math.ceil((r.total ?? 0) / PER));
+      const lines = ls.map((l, i) => `${i + 1}. ${RARITY_ICON[l.cat.rarity]} <b>${esc(l.cat.name)}</b> ${l.cat.rarity} ${l.cat.profession} L${l.cat.level}${l.isMine ? ' (punyamu)' : ''}
+    📊 p${l.cat.stats.productivity} e${l.cat.stats.efficiency} l${l.cat.stats.luck} n${l.cat.stats.endurance}${l.cat.traits?.length ? ` · ✨${l.cat.traits.map((t) => esc(t.name)).join(', ')}` : ''}
+    💰 <b>${num(l.price)}</b> PAWS · ${esc(l.sellerUsername)}`);
+      const set = (patch) => () => ui.browse({ ...p, page: 1, ...patch });
+      const filt = [p.rarity && `rarity ${p.rarity}`, p.profession && `profesi ${p.profession}`, p.minLevel && `L${p.minLevel}+`, p.q && `"${p.q}"`].filter(Boolean).join(' · ') || 'semua';
+      const SORTS = { price_asc: 'Termurah', price_desc: 'Termahal', newest: 'Terbaru', level_desc: 'Level ↓', stats_desc: 'Stat ↓', productivity_desc: 'Prod ↓', luck_desc: 'Luck ↓' };
+      const sortKeys = Object.keys(SORTS);
       return {
-        text: `🛒 <b>Listing</b> ${esc(params.rarity ?? '')} (${esc(params.sort)})\n\n${lines.join('\n') || 'Kosong'}`,
-        kb: ui.nav(...ls.map((l, i) => [ui.btn(`🛍 Beli #${i + 1} ${l.cat.name} – ${num(l.price)}`, ui.confirm(`Beli <b>${esc(l.cat.name)}</b> (${l.cat.rarity} ${l.cat.profession} L${l.cat.level}) seharga <b>${num(l.price)} $PAWS</b>?\nSaldo: ${num(ui.state().me.balances.cat)}`, `Beli ${l.cat.name}`, () => ui.g.buyListing(l.id), ui.marketScreen))]), [ui.btn('⬅️ Market', () => ui.marketScreen)]),
+        text: `🛒 <b>Marketplace</b> · ${esc(SORTS[p.sort] ?? p.sort)} · ${esc(filt)}\n${r.total ?? 0} listing · hal ${p.page}/${pages} · saldo ${num(ui.state().me.balances.cat)} PAWS\n\n${lines.join('\n') || 'Kosong'}`,
+        kb: ui.nav(
+          ...ls.filter((l) => !l.isMine).map((l) => [ui.btn(`🛍 Beli ${l.cat.name} – ${num(l.price)}`, ui.confirm(`Beli <b>${esc(l.cat.name)}</b> (${l.cat.rarity} ${l.cat.profession} L${l.cat.level}) seharga <b>${num(l.price)} $PAWS</b>?\nSaldo: ${num(ui.state().me.balances.cat)}\n<i>Kucing baru butuh aklimasi sebentar sebelum bisa kerja.</i>`, `Beli ${l.cat.name}`, () => ui.g.buyListing(l.id), ui.catsScreen))]),
+          [...(p.page > 1 ? [ui.btn('◀️ Sebelumnya', () => ui.browse({ ...p, page: p.page - 1 }))] : []), ...(r.hasMore ? [ui.btn('Berikutnya ▶️', () => ui.browse({ ...p, page: p.page + 1 }))] : [])],
+          [ui.btn(`↕️ ${SORTS[sortKeys[(sortKeys.indexOf(p.sort) + 1) % sortKeys.length]]}`, set({ sort: sortKeys[(sortKeys.indexOf(p.sort) + 1) % sortKeys.length] })), ui.btn('🔎 Cari nama', ui.ask('Nama kucing yang dicari:', async (t) => ui.browse({ ...p, page: 1, q: t.trim() }))), ui.btn('🧹 Reset', () => ui.browse({ sort: p.sort }))],
+          ['COMMON', 'UNCOMMON', 'RARE', 'EPIC', 'LEGENDARY', 'MYTHIC'].map((x) => ui.btn(`${RARITY_ICON[x]}${p.rarity === x ? '✓' : ''}`, set({ rarity: p.rarity === x ? undefined : x }))),
+          [['LUMBERJACK', '🪓'], ['FARMER', '🌾'], ['MINER', '⛏'], ['ENGINEER', '🔧'], ['MERCHANT', '💼'], ['ENERGY_WORKER', '⚡']].map(([x, ic]) => ui.btn(`${ic}${p.profession === x ? '✓' : ''}`, set({ profession: p.profession === x ? undefined : x }))),
+          [3, 5, 10, 20].map((lv) => ui.btn(`L${lv}+${p.minLevel === lv ? '✓' : ''}`, set({ minLevel: p.minLevel === lv ? undefined : lv }))),
+          [ui.btn('⬅️ Market', () => ui.marketScreen)],
+        ),
       };
     };
   }
@@ -541,6 +620,37 @@ ${ref ? `🤝 <b>Referral</b> ${esc(ref.code)} · ${ref.referredCount} teman · 
         text: `🛒 <b>Beli $PAWS pakai ${pay.toUpperCase()}</b>\nSaldo: ETH ${num(bal.eth, 6)} · USDG ${num(bal.usdg)}\nBatas per transaksi ${lim.minUsdg}-${lim.maxUsdg} USDG. Sisakan ETH sedikit untuk gas.`,
         kb: ui.nav(presets.map((p) => ui.btn(`${p} ${pay.toUpperCase()}`, go(p))), [ui.btn('✏️ Jumlah custom', ui.ask(`Jumlah ${pay.toUpperCase()} untuk beli PAWS:`, async (t) => { if (!(Number(t) > 0)) throw new Error('Jumlah tidak valid'); return go(t.trim())(); }))], [ui.btn('⬅️ Wallet', () => ui.walletScreen)]),
       };
+    };
+  }
+
+  async referralScreen() {
+    this.panelScreen = this.referralScreen;
+    const r = await this.g.referrals();
+    const sc = r.statusCounts;
+    const players = (r.referredPlayers ?? []).slice(0, 10).map((p) => `• ${esc(p.username ?? '(belum ada nama)')} · ${esc(p.status)} · ${ago(p.joinedAt)}`).join('\n');
+    const earn = (r.earnings ?? []).slice(0, 5).map((e) => `• +${num(e.amount)} PAWS ${esc(e.status ?? '')}`).join('\n');
+    const ms = (r.milestones ?? []).map((m) => `• ${esc(m.id ?? m.milestone ?? '')} ${esc(m.status ?? '')}`).join('\n');
+    const share = `https://t.me/share/url?url=${encodeURIComponent(r.url)}&text=${encodeURIComponent('Main Paws of Sherwood, kucingmu kerja & dibayar saham ter-tokenisasi 🐾')}`;
+    return {
+      text: `${this.takeFlash()}🤝 <b>Referral</b>
+Kode: <code>${esc(r.code)}</code>
+Link: ${esc(r.url)}
+Komisi: <b>${r.rateBps / 100}%</b> dari $PAWS yang dibelanjakan teman
+Teman: <b>${r.referredCount}</b> (pending ${sc.pending} · review ${sc.review} · approved ${sc.approved} · rejected ${sc.rejected})
+Pendapatan: earned ${num(r.totals.earned)} · held ${num(r.totals.held)} · released ${num(r.totals.released)} PAWS
+Household: ${r.household.active ? `✅ aktif +${r.household.bonusBps / 100}% luck` : '❌'} (${r.household.partners.length} partner aktif ${r.household.activeDays} hari)
+Ticket: 1 per ${num(r.ticketRules.spendEvery)} PAWS belanja teman · ${r.ticketRules.perMembership} per membership
+
+<b>Teman</b>\n${players || '-'}
+${earn ? `\n<b>Pendapatan terakhir</b>\n${earn}` : ''}${ms ? `\n<b>Milestone</b>\n${ms}` : ''}`,
+      kb: this.nav(
+        [{ text: '📤 Bagikan link', url: share }],
+        [this.btn('✏️ Ganti kode referral', this.ask('Kode referral baru (3-16 huruf/angka, contoh RYGROUP):\n⚠️ Kalau diganti, link lama tidak berlaku lagi dan REFERRAL_CODE di installer/.env harus ikut diganti.', async (t) => {
+          const code = t.trim().toUpperCase();
+          if (!/^[A-Z0-9]{3,16}$/.test(code)) throw new Error('Kode harus 3-16 huruf/angka');
+          return this.confirm(`Ganti kode referral jadi <code>${esc(code)}</code>?`, `Kode referral jadi ${code}`, () => this.g.setReferralCode(code), this.referralScreen)();
+        }))],
+      ),
     };
   }
 
@@ -650,12 +760,12 @@ ${subs || 'Belum ada submission.'}`,
     return {
       text: `${this.takeFlash()}📜 <b>Permit Office</b> · ${pm.plot.name} (maks ${pm.plot.maxRarity})
 Stasiun ${pm.stations.deployed}/${pm.stations.slots} · ticket permit ${pm.wallet.permitTickets} · ticket kucing ${pm.wallet.catTickets}
-${pm.canStart ? '✅ bisa ajukan' : `⛔ ${esc(pm.blockers.join(', '))}`}
+${pm.canStart ? '✅ bisa ajukan' : `⛔ ${esc(blockers(pm.blockers))}`}
 Fragment: ${frag}
 ${act}
 
 🍺 <b>Tavern</b> · kucing ke-${rc.ladder.sequence} · ${dur(rc.durationSeconds)}
-${rc.canStart ? '✅ bisa rekrut' : `⛔ ${esc(rc.blockers.join(', '))}`} · pity ${rc.pity.count}/${rc.pity.everyN} (${rc.pity.minRarity}+)
+${rc.canStart ? '✅ bisa rekrut' : `⛔ ${esc(blockers(rc.blockers))}`} · pity ${rc.pity.count}/${rc.pity.everyN} (${rc.pity.minRarity}+)
 ${ract}`,
       kb: this.nav(...rows),
     };
@@ -694,7 +804,8 @@ ${ract}`,
       text: `${this.takeFlash()}⚙️ <b>Setting bot</b>
 Shift: <b>${s.get('shiftMode')}</b> ${s.get('shiftMode') === 'auto' ? `(terpanjang yang stamina cukup, ${s.get('minShift')}-${s.get('maxShift')} menit)` : 'menit'}
 Prioritas: <b>${s.get('prefer') === 'points' ? 'poin reward' : 'resource'}</b>
-Maks belanja otomatis per aksi: <b>${num(s.get('maxSpendPerAction'))} PAWS</b>
+Maks belanja otomatis per aksi: <b>${num(s.get('maxSpendPerAction'))} PAWS</b> · cadangan tidak dipakai: <b>${num(s.get('keepPaws'))} PAWS</b>
+Auto Grow: isi slot kucing kosong (beli di market) → perluas lahan → upgrade stasiun poin (+15% output/level) → House jika syarat lahan
 Repair kalau kondisi &lt; ${s.get('repairBelow')}% · tick ${s.get('tickSeconds')} detik
 Notifikasi: ${s.get('notify')}`,
       kb: this.nav(
@@ -704,13 +815,47 @@ Notifikasi: ${s.get('notify')}`,
         [tg('levelUpSpendPaws', 'Level up pakai PAWS'), tg('autoRepair', 'Repair')],
         [tg('repairSpendPaws', 'Repair pakai PAWS'), tg('autoClaimRewards', 'Claim reward')],
         [tg('autoPermits', 'Permit & stasiun'), tg('autoRecruit', 'Rekrut gratis')],
-        [tg('autoUpgradeBuildings', 'Upgrade bangunan (PAWS)'), tg('dropOverflow', 'Claim walau gudang penuh')],
+        [tg('autoUpgradeBuildings', 'Auto Grow (PAWS)'), tg('dropOverflow', 'Claim walau gudang penuh')],
         [tg('autoCollectOnchain', 'Collect reward on-chain'), tg('fastActivity', 'Shift 10m s/d eligible')],
+        [tg('autoBuyCats', 'Beli kucing market (slot kosong)')],
         [cycle('shiftMode', SHIFT_MODES, '⏱ Shift'), cycle('maxShift', ['60', '120', '240', '480'], 'Maks')],
         [cycle('prefer', ['points', 'resources'], '🎯 Prioritas'), cycle('notify', NOTIFY_MODES, '🔔')],
         [this.btn('💸 Ubah maks belanja', this.ask('Maksimal $PAWS per aksi otomatis (contoh 500):', async (t) => { s.set('maxSpendPerAction', Math.max(0, Number(t) || 0)); return this.settingsScreen; })),
-          this.btn('🛠 Batas repair', this.ask('Repair otomatis kalau kondisi di bawah berapa % (contoh 50):', async (t) => { s.set('repairBelow', Math.min(100, Math.max(1, Number(t) || 50))); return this.settingsScreen; }))],
+          this.btn('🏦 Cadangan PAWS', this.ask('Jumlah PAWS yang selalu disisakan (tidak dipakai otomatis), contoh 500:', async (t) => { s.set('keepPaws', Math.max(0, Number(t) || 0)); return this.settingsScreen; }))],
+        [this.btn('🛠 Batas repair', this.ask('Repair otomatis kalau kondisi di bawah berapa % (contoh 50):', async (t) => { s.set('repairBelow', Math.min(100, Math.max(1, Number(t) || 50))); return this.settingsScreen; }))],
       ),
+    };
+  }
+
+  async helpScreen() {
+    this.panelScreen = this.helpScreen;
+    return {
+      text: `❓ <b>Panduan tombol</b>
+
+<b>Perintah</b>: /menu dashboard · /cats kucing · /market market · /wallet wallet · /rewards reward · /referral referral · /log log · /pause stop otomatis · /resume jalan lagi · /help panduan
+
+<b>Dashboard</b>
+🔄 Refresh data · ⏸/▶️ matikan/nyalakan auto · ⚡ Jalankan 1 siklus sekarang
+
+🐱 <b>Kucing</b>: pilih kucing → ⛏ kerja (pilih stasiun &amp; durasi, 🎁 = dapat poin) · 😴 rest gratis · 💤 nap berbayar · 📈 level up (pilih peluang) · ⭐ main cat · 🛡 protect · ✏️ rename · 💲 jual · 🗑 release
+🏗 <b>Bangunan</b>: ⬆️ upgrade · 🛠 repair · 🚑 emergency repair gratis · 🔄 putar · 📦 simpan · 📍 pasang · 🏡 perluas lahan
+⏱ <b>Shift</b>: ✅ claim · ❌ batal · ⚡ fast track
+🎁 <b>Reward</b>: checklist eligible, poin per pool saham &amp; $PAWS, 💰 claim &amp; collect on-chain
+🛒 <b>Market</b>: floor harga, 🔍 termurah/🆕 terbaru/💪 stat, filter rarity, 🛍 beli, 💲 jual, 🏷 batal listing, 📈 penjualan terakhir
+👛 <b>Wallet</b>: saldo game &amp; on-chain, harga PAWS, 🛒 beli PAWS (ETH/USDG, langsung masuk game), ⬇️ deposit, ⬆️ withdraw, explorer
+📜 <b>Permit &amp; Rekrut</b>: beli permit, pakai ticket, 🎯 target fragment, 🔨 craft, 🍺 rekrut kucing, ✅ claim semua
+🎓 <b>Tutorial</b>: progres, auto on/off, skip
+🏆 <b>Leaderboard</b>: top pemain &amp; posisimu
+👑 <b>Membership</b>: pass 50 USDG/30 hari → pool khusus member
+🤝 <b>Referral</b>: kode &amp; link, 📤 bagikan, statistik teman, ✏️ ganti kode
+🔒 <b>Stake</b>: kunci PAWS untuk diskon waktu bangun/rekrut
+✍️ <b>Creator</b>: daftar, hubungkan X, kirim link post → hadiah SPCX
+🤝 <b>Trade P2P</b>: tawar PAWS untuk kucing pemain lain, setujui/batal
+⚙️ <b>Setting</b>: semua fitur otomatis on/off, mode shift, prioritas, batas belanja, notifikasi
+📋 <b>Log</b> aktivitas · 💡 <b>Strategi Cuan</b>
+
+Semua aksi yang memakai PAWS/USDG/ETH selalu minta konfirmasi ✅ dulu.`,
+      kb: this.nav(),
     };
   }
 

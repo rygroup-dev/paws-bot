@@ -78,7 +78,7 @@ export class Engine {
   }
 
   balance() { return n(this.state.me?.balances?.cat); }
-  canSpend(cost) { return n(cost) <= this.balance() && n(cost) <= this.s.get('maxSpendPerAction'); }
+  canSpend(cost) { return n(cost) <= this.balance() - n(this.s.get('keepPaws')) && n(cost) <= this.s.get('maxSpendPerAction'); }
 
   // ---------- loop
   start() {
@@ -122,7 +122,7 @@ export class Engine {
       if (this.s.get('autoRepair')) await this.repairs();
       if (this.s.get('autoPermits')) await this.permitsAndStations();
       if (this.s.get('autoRecruit') || this.inTutorial()) await this.recruiting(false, !this.inTutorial());
-      if (this.s.get('autoUpgradeBuildings')) await this.buildingUpgrades();
+      if (this.s.get('autoUpgradeBuildings')) await this.grow();
       if (this.s.get('autoClaimRewards')) await this.claimRewards();
       else await this.slow('rewards', 120000, () => this.g.rewards()).then((rw) => { if (rw) this.state.rewards = rw; });
       if (this.s.get('autoFarm')) await this.farm();
@@ -232,23 +232,25 @@ export class Engine {
         this.log(`✅ Claim ${j.catName} @ ${j.buildingType}: ${got}${pts} +${res?.xp ?? 0}xp${jp}`, jp ? 'important' : 'info');
       }
     }
-    // naps
-    for (const nap of p.house?.quickNap?.active ?? []) {
-      if (new Date(nap.completesAt ?? nap.endsAt ?? 0).getTime() <= now) await this.try('claim nap', () => this.g.claimNap(), { quiet: true });
+    // quick naps and free rests (house.quickNap.active / house.freeRest.active, flag `ready`)
+    const naps = [...(p.house?.quickNap?.active ?? []), ...(p.house?.freeRest?.active ?? [])];
+    if (naps.some((x) => x.ready || new Date(x.completesAt).getTime() <= now)) {
+      const r = await this.try('claim nap/rest', () => this.g.claimNap(), { quiet: true });
+      if (r) this.log(`😺 Istirahat selesai: ${naps.filter((x) => x.ready || new Date(x.completesAt).getTime() <= now).map((x) => x.catName).join(', ')}`);
     }
-    // building upgrades / expansion finished
+    // station upgrades finished (status UPGRADING with no time left)
     for (const b of p.buildings ?? []) {
-      if (b.status === 'UPGRADING' && b.secondsRemaining === 0) {
-        const r = await this.try('claim upgrade', () => this.g.claimBuildingUpgrade(b.id), { quiet: true });
-        if (r) this.log(`🏗️ ${b.name} naik ke level ${b.level + 1}`, 'important');
-      }
+      if (b.type === 'HOUSE' || b.status !== 'UPGRADING' || b.secondsRemaining > 0) continue;
+      const r = await this.try(`claim upgrade ${b.name}`, () => this.g.claimBuildingUpgrade(b.id), { quiet: true });
+      if (r) this.log(`🏗️ ${b.name} naik ke level ${b.level + 1}`, 'important');
     }
-    if (p.expansion && new Date(p.expansion.completesAt ?? 0).getTime() <= now) {
+    if (p.house?.upgrade && (p.house.upgrade.claimable || new Date(p.house.upgrade.completesAt).getTime() <= now)) {
+      const r = await this.try('claim house', () => this.g.claimBuildingUpgrade(p.house.buildingId), { quiet: true });
+      if (r) this.log(`🏠 House naik ke level ${p.house.upgrade.toLevel}`, 'important');
+    }
+    if (p.expansion && (p.expansion.claimable || new Date(p.expansion.completesAt).getTime() <= now)) {
       const r = await this.try('claim expand', () => this.g.claimExpand(), { quiet: true });
-      if (r) this.log('🏡 Lahan berhasil diperluas!', 'important');
-    }
-    if (p.house?.upgrade && new Date(p.house.upgrade.completesAt ?? p.house.upgrade.endsAt ?? 0).getTime() <= now) {
-      await this.try('claim house', () => this.g.claimBuildingUpgrade(p.house.buildingId), { quiet: true });
+      if (r) this.log(`🏡 Lahan diperluas ke tier ${p.expansion.toTier}!`, 'important');
     }
     // cat level-up attempts waiting to resolve
     const ups = await this.try('upgrades', () => this.g.upgrades(), { quiet: true });
@@ -320,8 +322,8 @@ export class Engine {
   }
 
   async permitsAndStations() {
-    const sp = this.state.me.starterPermit;
-    if (sp && sp.status !== 'LOCKED' && !sp.stationId) await this.claimStarterPermit();
+    // starter permit status: LOCKED | READY | CLAIMED | DISABLED
+    if (this.state.me.starterPermit?.status === 'READY') await this.claimStarterPermit();
     await this.slow('permits', 60000, () => this.claimPermits());
     await this.deployStored();
   }
@@ -397,24 +399,55 @@ export class Engine {
     if (r) this.log(`🍺 Rekrut kucing dimulai${useTicket ? ' (pakai ticket)' : free ? ' (gratis)' : ''}`, 'important');
   }
 
-  // ---------- building / house / land upgrades (opt-in, spends $PAWS)
-  async buildingUpgrades() {
+  // ---------- growth: stations / land / house (opt-in, spends $PAWS)
+  // Station levels raise output (+15% per level, config.buildings[].levels.outputMultiplierBps),
+  // so point-earning stations come first, best-paying pool first. Land expansion (more stations
+  // and active cats) is taken as soon as it unlocks. The House earns nothing itself; it is only
+  // upgraded when the next land tier needs it. If the top target is not affordable yet, the bot
+  // saves for it instead of spending on something weaker.
+  growPlan() {
     const p = this.state.property;
-    const queue = p.propertyQueue ?? { used: 0, slots: 1 };
-    if (queue.used >= queue.slots) return;
-    const options = [];
-    const h = p.house?.nextLevel;
-    if (h?.requirements?.met && !p.house.upgrade) options.push({ id: p.house.buildingId, name: 'House', cost: h.catCost, prio: 0 });
+    const vpp = new Map((this.state.rewards?.pools ?? []).map((pl) => [pl.category, n(pl.prizeQuote) / Math.max(1, n(pl.totalPoints))]));
+    const plan = [];
+    const nt = p.nextTier;
+    if (nt?.canExpand && nt.requirements?.met) plan.push({ kind: 'land', name: `Lahan → ${nt.name}`, cost: nt.catCost, ready: true, prio: 0 });
     for (const b of p.buildings ?? []) {
-      if (b.core && b.type === 'HOUSE') continue;
-      if (b.nextLevel?.canUpgrade ?? b.nextLevel?.requirements?.met) options.push({ id: b.id, name: b.name, cost: b.nextLevel.catCost, prio: b.pointsCategory ? 1 : 2 });
+      if (!b.pointsCategory || !b.nextLevel || b.type === 'HOUSE') continue;
+      plan.push({ kind: 'building', id: b.id, name: `${b.name} L${b.nextLevel.level}`, cost: b.nextLevel.catCost, ready: !!b.nextLevel.canUpgrade, prio: 1, value: vpp.get(b.pointsCategory) ?? 0 });
     }
-    options.sort((a, b) => a.prio - b.prio || n(a.cost) - n(b.cost));
-    const pick = options.find((o) => this.canSpend(o.cost));
-    if (pick) {
-      const r = await this.try(`upgrade ${pick.name}`, () => this.g.upgradeBuilding(pick.id, pick.cost));
-      if (r) this.log(`🏗️ Upgrade ${pick.name} dimulai (${n(pick.cost)} PAWS)`, 'important');
-    }
+    const houseNeeded = nt?.requirements?.items?.some((i) => i.kind === 'HOUSE' && !i.met);
+    const h = p.house?.nextLevel;
+    if (h && !p.house.upgrade && houseNeeded) plan.push({ kind: 'building', id: p.house.buildingId, name: `House L${h.level} (syarat lahan)`, cost: h.catCost, ready: !!h.requirements?.met, prio: 2 });
+    plan.sort((a, b) => a.prio - b.prio || n(a.cost) - n(b.cost) || (b.value ?? 0) - (a.value ?? 0));
+    return plan;
+  }
+
+  // A free active-cat slot is the biggest gain (one more worker), and a market cat usually costs
+  // a fraction of a recruit. Buy the cheapest listing whose profession matches a point station.
+  async fillCatSlots() {
+    const p = this.state.property;
+    const cats = this.state.cats ?? [];
+    if (cats.length >= (p.activeCats?.limit ?? 0)) return false;
+    const wanted = new Set((p.buildings ?? []).filter((b) => b.pointsCategory && b.hostsJobs).map((b) => b.preferredProfession).filter(Boolean));
+    const floor = await this.g.marketFloor().catch(() => null);
+    const res = await this.try('market', () => this.g.market({ sort: 'price_asc', limit: 30 }), { quiet: true });
+    const ok = (res?.listings ?? []).filter((l) => !l.isMine && l.status === 'ACTIVE' && this.canSpend(l.price) && n(l.price) <= n(floor?.byRarity?.[l.cat.rarity] ?? l.price) * 1.1);
+    const pick = ok.find((l) => wanted.has(l.cat.profession)) ?? ok[0];
+    if (!pick) return false;
+    const r = await this.try(`beli kucing ${pick.cat.name}`, () => this.g.buyListing(pick.id));
+    if (r) this.log(`🐱 Beli kucing ${pick.cat.name} (${pick.cat.rarity} ${pick.cat.profession} L${pick.cat.level}) seharga ${n(pick.price)} PAWS`, 'important');
+    return !!r;
+  }
+
+  async grow() {
+    const p = this.state.property;
+    if (this.s.get('autoBuyCats') && (await this.fillCatSlots())) return;
+    const queue = p.propertyQueue ?? { used: 0, slots: 1 };
+    if (queue.used >= queue.slots || p.expansion) return;
+    const top = this.growPlan()[0];
+    if (!top || !top.ready || !this.canSpend(top.cost)) return;   // save up for the best target
+    const r = await this.try(`grow ${top.name}`, () => (top.kind === 'land' ? this.g.expand(top.cost) : this.g.upgradeBuilding(top.id, top.cost)));
+    if (r) this.log(`🏗️ Upgrade ${top.name} dimulai (${n(top.cost)} PAWS)`, 'important');
   }
 
   // ---------- farming
@@ -454,6 +487,10 @@ export class Engine {
 
     const free = new Map(stations.map((b) => [b.id, b.slots - b.activeJobs]));
     const preferPoints = this.s.get('prefer') === 'points';
+    // $ value of one point in each stock pool this round (prize / total points). Pools with few
+    // contributors pay far more per point, so a point there is worth more than elsewhere.
+    const vpp = new Map((this.state.rewards?.pools ?? []).map((pl) => [pl.category, n(pl.prizeQuote) / Math.max(1, n(pl.totalPoints))]));
+    const avgV = [...vpp.values()].reduce((a, b) => a + b, 0) / Math.max(1, vpp.size) || 1;
     const rested = new Set();
     while (idle.length && capacity > 0) {
       let best = null;
@@ -467,7 +504,9 @@ export class Engine {
           const hours = o.projection?.hours || probeMinutes / 60;
           const pts = n(o.projection?.gamePoints) / hours;
           const resPerHour = n(o.perHour);
-          const score = (preferPoints ? pts * 100 : pts * 5) + resPerHour + (o.professionMatch ? 1 : 0);
+          // Points weighted by how much the station's pool pays per point (relative to average).
+          const weight = b.pointsCategory ? (vpp.get(b.pointsCategory) ?? avgV) / avgV : 0;
+          const score = (preferPoints ? pts * weight * 100 : pts * weight * 5) + resPerHour + (o.professionMatch ? 1 : 0);
           if (!best || score > best.score) best = { cat, b, minutes, score };
         }
       }

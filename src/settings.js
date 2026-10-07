@@ -22,9 +22,11 @@ export const DEFAULTS = {
   fastActivity: true,       // until 5 shifts are claimed, use 10-min shifts so rewards unlock sooner
   autoPermits: true,      // claim finished permits / crafts / recycling, deploy new stations
   autoRecruit: true,      // use free recruit credits / tickets
-  autoUpgradeBuildings: false, // spend $PAWS on station / house upgrades
+  autoUpgradeBuildings: false, // Auto Grow: spend $PAWS on station / land / house upgrades
+  autoBuyCats: false,     // Auto Grow: buy a market cat when an active-cat slot is empty
   dropOverflow: true,     // when storage is full, still claim (losing the overflow) instead of stalling
   maxSpendPerAction: 1000,// $PAWS ceiling for any single automatic purchase
+  keepPaws: 0,            // $PAWS reserve automatic spending never touches
   tickSeconds: 45,
   notify: 'important',    // 'all' | 'important' | 'off'
 };
