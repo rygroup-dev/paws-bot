@@ -45,10 +45,20 @@ try {
 
 const settings = new Settings(dataDir);
 let tg = null;
+// Activity log on disk (data/bot.log, rotated at 2 MB) so the bot's history can be reviewed.
+const logPath = path.join(dataDir, 'bot.log');
+const writeLog = (line) => {
+  console.log(line);
+  try {
+    if (fs.existsSync(logPath) && fs.statSync(logPath).size > 2_000_000) fs.renameSync(logPath, `${logPath}.1`);
+    fs.appendFileSync(logPath, `${new Date().toISOString().slice(0, 10)} ${line}\n`);
+  } catch {}
+};
 const engine = new Engine({
   game: new Game(client),
   settings,
   notify: (msg) => tg?.notify(msg),
+  log: writeLog,
 });
 
 engine.chain = new Chain(client, engine.g);

@@ -213,6 +213,11 @@ export class TelegramUI {
     return `${el.eligible ? '✅ <b>Eligible reward</b>' : '⛔ <b>Belum eligible reward</b>'}\n${rows.join('\n')}`;
   }
 
+  // Requirement items from the server (quotes, upgrades, land) as ✅/❌ have/need lines.
+  reqLines(items, indent = '   ') {
+    return (items ?? []).map((i) => `${indent}${i.met ? '✅' : '❌'} ${esc(i.label)} ${num(i.have, 0)}/${num(i.need, 0)}${i.met ? '' : ` (kurang ${num(i.missing, 0)})`}`).join('\n');
+  }
+
   takeFlash() {
     const f = this.flash;
     this.flash = null;
@@ -258,7 +263,7 @@ ${resLine}
 🐱 <b>Kucing</b> (${p?.activeCats?.working ?? 0}/${p?.activeCats?.limit ?? '-'} kerja)
 ${catLines || '-'}
 ${tut}
-🎁 Ronde #${ep?.epochNumber ?? '-'} sisa ${ep ? until(ep.endsAt, now) : '-'} · poin saya ${num(myPts)}
+${this.e.needed?.size ? `🎯 Bot sedang mengumpulkan: ${[...this.e.needed].map(([k, v]) => `${RES_ICON[k] ?? ''}${esc(k)} ${num(v, 0)}`).join(', ')} (untuk level up/upgrade)\n` : ''}🎁 Ronde #${ep?.epochNumber ?? '-'} sisa ${ep ? until(ep.endsAt, now) : '-'} · poin saya ${num(myPts)}
 ${elig}
 
 📊 claim ${stt.claims} · shift ${stt.jobsStarted} · level up ${stt.levelUps} · reward ${stt.rewardsClaimed}${stt.lastError ? `\n❌ ${esc(stt.lastError)}` : ''}`;
@@ -297,6 +302,10 @@ ${elig}
       const p = ui.state().property;
       const job = p.activeJobs?.find((j) => j.catId === id);
       const qn = p.house?.quickNap;
+      const q = c.level < c.levelCap ? await ui.g.upgradeQuote(id, 0).catch(() => null) : null;
+      // Same choice the engine makes: lowest expected PAWS per success (free levels -> 100%).
+      const pick = q ? [...q.stops].sort((a, b) => n(a.catCost) / a.chanceBps - n(b.catCost) / b.chanceBps || b.chanceBps - a.chanceBps)[0] : null;
+      const lvlInfo = q ? `\n\n📈 <b>Syarat naik ke L${q.targetLevel}</b> (bot pakai peluang ${pick.chanceBps / 100}%, ${n(pick.catCost) ? `${num(pick.catCost)} PAWS` : 'gratis'})\n${ui.reqLines([{ kind: 'XP', label: 'XP', have: q.xp.current, need: q.xp.required, missing: Math.max(0, q.xp.required - q.xp.current), met: q.xp.met }, ...(q.requirements?.items ?? []).filter((i) => i.kind !== 'XP')])}${n(q.costs.catCost) === 0 ? '\n   ✅ PAWS gratis' : ''}${q.blockers.includes('CAT_BUSY') ? '\n   ⏳ menunggu kucing selesai kerja' : ''}` : '';
       const text = `${ui.takeFlash()}${RARITY_ICON[c.rarity] ?? ''} <b>${esc(c.name)}</b> ${c.isMain ? '⭐ main' : ''} ${c.isProtected ? '🛡' : ''}
 <code>${esc(c.serial)}</code> · ${esc(c.rarity)} ${esc(c.profession)}
 Level <b>${c.level}</b>/${c.levelCap} · XP ${c.xp}/${c.xpToNext}
@@ -304,7 +313,7 @@ Level <b>${c.level}</b>/${c.levelCap} · XP ${c.xp}/${c.xpToNext}
 📊 prod ${c.stats.productivity} · eff ${c.stats.efficiency} · luck ${c.stats.luck} · end ${c.stats.endurance}
 ✨ ${c.traits.map((t) => `${esc(t.name)} (${esc(t.description)})`).join(', ') || '-'}
 🎰 Jackpot ${(c.jackpotChanceBps / 100).toFixed(2)}% · kerja ${c.lifetimeWorkHours} jam
-Status: ${ACT_ICON[c.activity] ?? c.activity}${job ? ` di ${esc(job.buildingType)}, selesai ${until(job.endsAt, ui.g.c.now())}` : ''}`;
+Status: ${ACT_ICON[c.activity] ?? c.activity}${job ? ` di ${esc(job.buildingType)}, selesai ${until(job.endsAt, ui.g.c.now())}` : ''}${lvlInfo}`;
       const rows = [];
       if (c.activity === 'IDLE') rows.push([ui.btn('⛏ Suruh kerja', () => ui.pickBuilding(id)), ui.btn('😴 Rest gratis', ui.doThen(`${c.name} istirahat`, () => ui.g.rest(id), ui.catScreen(id)))]);
       if (c.activity === 'IDLE' && qn) rows.push([ui.btn(`💤 Quick nap (${num(qn.catCost)} PAWS)`, ui.confirm(`Quick nap ${esc(c.name)} seharga ${num(qn.catCost)} $PAWS?`, 'Quick nap', () => ui.g.nap(id, qn.catCost), ui.catScreen(id)))]);
@@ -368,6 +377,8 @@ XP ${bar(q.xp.current, q.xp.required)} ${q.xp.current}/${q.xp.required} (kucing 
 Biaya: ${num(q.costs.catCost)} PAWS + ${esc(Object.entries(q.costs.resources).map(([k, v]) => `${v} ${k}`).join(', '))} · persiapan ${dur(q.prepSeconds)}
 Peluang dasar ${q.chance.baseBps / 100}% (bisa dinaikkan sampai 100% dengan biaya lebih)
 Bisa sekarang: ${q.canUpgrade ? '✅' : `⛔ ${esc(blockers(q.blockers))}`}
+<b>Syarat</b>:
+${ui.reqLines(q.requirements?.items)}
 XP hanya didapat dari kerja shift (tidak ada item XP). L1-3 gratis (peluang 100% juga gratis); L4+ wajib PAWS + XP, PAWS bukan pengganti XP.
 Gagal = PAWS &amp; resource hangus, level &amp; XP aman, peluang berikutnya +${ui.e.cfg.upgrade.resolveStepPct}% (maks +${ui.e.cfg.upgrade.resolveMaxPct}%). Bot memilih peluang dengan biaya rata-rata per sukses termurah. Auto level up: ${ui.s.get('autoLevelUp') ? 'ON' : 'OFF'}${ui.s.get('levelUpSpendPaws') ? ' (boleh bayar PAWS)' : ' (hanya yang gratis)'}
 Produksi/jam: ${q.gain?.at?.perHour?.now ?? '-'} → ${q.gain?.at?.perHour?.after ?? '-'}${q.gain?.at?.points ? ` · poin/jam ${q.gain.at.points.perHour.now} → ${q.gain.at.points.perHour.after}` : ''}`,
@@ -413,7 +424,7 @@ Produksi/jam: ${q.gain?.at?.perHour?.now ?? '-'} → ${q.gain?.at?.perHour?.afte
     const plan = this.e.growPlan().slice(0, 3).map((x, i) => `${i + 1}. ${esc(x.name)} – ${num(x.cost)} PAWS ${x.ready ? '✅' : '⏳'}`).join('\n');
     const freeSlots = (p.activeCats?.limit ?? 0) - (this.state().cats?.length ?? 0);
     return {
-      text: `${this.takeFlash()}🏗 <b>Bangunan</b> · ${esc(p.name)} ${p.size}x${p.size}\n${lines.join('\n')}\n\n🏡 Perluas ke <b>${esc(nt?.name ?? '-')}</b>: ${nt ? (nt.requirements.met ? '✅ bisa' : `⛔ ${esc(req)}`) : 'maks'}
+      text: `${this.takeFlash()}🏗 <b>Bangunan</b> · ${esc(p.name)} ${p.size}x${p.size}\n${lines.join('\n')}\n\n🏡 Perluas ke <b>${esc(nt?.name ?? '-')}</b>: ${nt ? (nt.requirements.met ? '✅ bisa' : `⛔\n${this.reqLines(nt.requirements.items)}`) : 'maks'}
 🐱 Slot kucing kosong: <b>${Math.max(0, freeSlots)}</b>${freeSlots > 0 ? ' (beli kucing di Market = poin bertambah paling besar)' : ''}
 🎯 <b>Target Auto Grow</b> (${this.s.get('autoUpgradeBuildings') ? 'ON' : 'OFF'}):\n${plan || '-'}`,
       kb: this.nav(
@@ -437,7 +448,7 @@ Produksi/jam: ${q.gain?.at?.perHour?.now ?? '-'} → ${q.gain?.at?.perHour?.afte
 Status ${b.status} · kondisi ${bar(b.condition, 100)} ${b.condition}%
 Slot ${b.activeJobs}/${b.slots} · profesi cocok ${esc(b.preferredProfession ?? '-')}
 ${b.producesResource ? `Produksi ${RES_ICON[b.producesResource]} ${b.producesResource}` : ''}${b.rewardSymbol ? ` · Reward ${b.rewardSymbol} (${b.pointsCategory}) ${b.gamePointsPerHour} pts/jam` : ''}
-${isHouse ? `House: nap ${p.house.quickNap.minutes}m (${num(p.house.quickNap.catCost)} PAWS), rest gratis ${p.house.freeRest.minutes}m +${p.house.freeRest.staminaRestored}⚡\n` : ''}Upgrade → L${nl?.level ?? '-'}: ${nl ? `${num(nl.catCost)} PAWS + ${esc(JSON.stringify(nl.resourceCost ?? {}))} ${nl.requirements?.met ? '✅' : `⛔ ${esc(miss)}`}` : 'maks'}
+${isHouse ? `House: nap ${p.house.quickNap.minutes}m (${num(p.house.quickNap.catCost)} PAWS), rest gratis ${p.house.freeRest.minutes}m +${p.house.freeRest.staminaRestored}⚡\n` : ''}Upgrade → L${nl?.level ?? '-'}: ${nl ? `${num(nl.catCost)} PAWS ${nl.requirements?.met ? '✅ siap' : '⛔'}\n${ui.reqLines(nl.requirements?.items)}` : 'maks'}
 ${nl?.unlocks ? `Buka: ${esc(nl.unlocks.join(', '))}` : ''}`;
       const rows = [];
       if (nl?.requirements?.met) rows.push([ui.btn(`⬆️ Upgrade (${num(nl.catCost)} PAWS)`, ui.confirm(`Upgrade ${esc(b.name)} ke L${nl.level} seharga ${num(nl.catCost)} $PAWS?`, 'Upgrade dimulai', () => ui.g.upgradeBuilding(b.id, nl.catCost), ui.buildingScreen(id)))]);

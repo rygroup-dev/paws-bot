@@ -117,7 +117,11 @@ export class Engine {
         return 3000;
       }
       if (this.s.get('autoTutorial') && st.tutorial?.active) await this.tutorialStep();
+      const claimed = this.stats.claims;
       await this.claimTimers();
+      // Cats freed by a claim are idle now: refresh so they can level up before the next shift.
+      if (this.stats.claims !== claimed) await this.refresh();
+      this.needed = new Map();   // resource -> amount missing for level ups / growth this tick
       if (this.s.get('autoLevelUp')) await this.levelUps();
       if (this.s.get('autoRepair')) await this.repairs();
       if (this.s.get('autoPermits')) await this.permitsAndStations();
@@ -270,9 +274,18 @@ export class Engine {
   // ---------- level ups
   async levelUps() {
     for (const cat of this.state.cats ?? []) {
-      if (!cat.canAttemptUpgrade || cat.pendingUpgradeId || cat.activity !== 'IDLE') continue;
+      // canAttemptUpgrade is also false when materials are short, so go by XP and ask for a
+      // quote: its requirements say exactly what is missing.
+      const xpReady = cat.canAttemptUpgrade || (cat.level < cat.levelCap && cat.xp >= cat.xpToNext);
+      if (!xpReady || cat.pendingUpgradeId || cat.activity !== 'IDLE') continue;
       const q = await this.try('quote', () => this.g.upgradeQuote(cat.id, 0), { quiet: true });
-      if (!q?.canUpgrade) continue;
+      if (!q) continue;
+      if (!q.canUpgrade) {
+        this.noteMissing(q.requirements?.items);
+        const why = q.requirements?.items?.filter((i) => !i.met).map((i) => `${i.label} ${Math.floor(n(i.have))}/${Math.ceil(n(i.need))}`).join(', ');
+        if (why) this.logOnce(`lvl:${cat.id}:${why}`, `⏳ Level up ${cat.name} L${q.currentLevel}→${q.targetLevel} tertunda: kurang ${why}`);
+        continue;
+      }
       // Pick the chance with the lowest expected $PAWS per success. Free levels (L1-3) cost 0 at
       // every chance, so that is 100%. For paid levels, cost/chance is lowest at the base chance
       // (e.g. 150 @80% = 187 per success vs 375 @100%); a failure keeps level and XP.
@@ -283,6 +296,22 @@ export class Engine {
       const r = await this.try(`level up ${cat.name}`, () => this.g.startUpgrade(cat.id, pct, best.catCost));
       if (r) this.log(`📈 Level up ${cat.name} → L${q.targetLevel} dimulai (peluang ${pct}%, biaya ${cost} PAWS)`);
     }
+  }
+
+  // Record missing materials (requirement items of kind RESOURCE) so farming can produce them.
+  noteMissing(items) {
+    for (const i of items ?? []) {
+      if (i.met || i.kind !== 'RESOURCE' || !i.resource) continue;
+      this.needed.set(i.resource, Math.max(this.needed.get(i.resource) ?? 0, n(i.missing)));
+    }
+  }
+
+  // Log a message at most once per hour per key (for states that repeat every tick).
+  logOnce(key, msg) {
+    this.onceSeen ??= new Map();
+    if (Date.now() - (this.onceSeen.get(key) ?? 0) < 3600000) return;
+    this.onceSeen.set(key, Date.now());
+    this.log(msg);
   }
 
   // ---------- repairs
@@ -414,14 +443,14 @@ export class Engine {
     const vpp = new Map((this.state.rewards?.pools ?? []).map((pl) => [pl.category, n(pl.prizeQuote) / Math.max(1, n(pl.totalPoints))]));
     const plan = [];
     const nt = p.nextTier;
-    if (nt?.canExpand && nt.requirements?.met) plan.push({ kind: 'land', name: `Lahan → ${nt.name}`, cost: nt.catCost, ready: true, prio: 0 });
+    if (nt?.canExpand && nt.requirements?.met) plan.push({ kind: 'land', name: `Lahan → ${nt.name}`, cost: nt.catCost, ready: true, prio: 0, reqs: nt.requirements?.items });
     for (const b of p.buildings ?? []) {
       if (!b.pointsCategory || !b.nextLevel || b.type === 'HOUSE') continue;
-      plan.push({ kind: 'building', id: b.id, name: `${b.name} L${b.nextLevel.level}`, cost: b.nextLevel.catCost, ready: !!b.nextLevel.canUpgrade, prio: 1, value: vpp.get(b.pointsCategory) ?? 0 });
+      plan.push({ kind: 'building', id: b.id, name: `${b.name} L${b.nextLevel.level}`, cost: b.nextLevel.catCost, ready: !!b.nextLevel.canUpgrade, prio: 1, value: vpp.get(b.pointsCategory) ?? 0, reqs: b.nextLevel.requirements?.items });
     }
     const houseNeeded = nt?.requirements?.items?.some((i) => i.kind === 'HOUSE' && !i.met);
     const h = p.house?.nextLevel;
-    if (h && !p.house.upgrade && houseNeeded) plan.push({ kind: 'building', id: p.house.buildingId, name: `House L${h.level} (syarat lahan)`, cost: h.catCost, ready: !!h.requirements?.met, prio: 2 });
+    if (h && !p.house.upgrade && houseNeeded) plan.push({ kind: 'building', id: p.house.buildingId, name: `House L${h.level} (syarat lahan)`, cost: h.catCost, ready: !!h.requirements?.met, prio: 2, reqs: h.requirements?.items });
     plan.sort((a, b) => a.prio - b.prio || n(a.cost) - n(b.cost) || (b.value ?? 0) - (a.value ?? 0));
     return plan;
   }
@@ -449,6 +478,7 @@ export class Engine {
     const queue = p.propertyQueue ?? { used: 0, slots: 1 };
     if (queue.used >= queue.slots || p.expansion) return;
     const top = this.growPlan()[0];
+    if (top && !top.ready) this.noteMissing(top.reqs);   // gather its materials while saving
     if (!top || !top.ready || !this.canSpend(top.cost)) return;   // save up for the best target
     const r = await this.try(`grow ${top.name}`, () => (top.kind === 'land' ? this.g.expand(top.cost) : this.g.upgradeBuilding(top.id, top.cost)));
     if (r) this.log(`🏗️ Upgrade ${top.name} dimulai (${n(top.cost)} PAWS)`, 'important');
@@ -496,6 +526,9 @@ export class Engine {
     const vpp = new Map((this.state.rewards?.pools ?? []).map((pl) => [pl.category, n(pl.prizeQuote) / Math.max(1, n(pl.totalPoints))]));
     const avgV = [...vpp.values()].reduce((a, b) => a + b, 0) / Math.max(1, vpp.size) || 1;
     const rested = new Set();
+    // Materials an idle cat was sent to gather this tick. Cats already on long shifts don't count:
+    // their output only lands when the shift ends, so a short gathering shift is still worth it.
+    const gathering = new Set();
     while (idle.length && capacity > 0) {
       let best = null;
       for (const b of stations) {
@@ -510,8 +543,13 @@ export class Engine {
           const resPerHour = n(o.perHour);
           // Points weighted by how much the station's pool pays per point (relative to average).
           const weight = b.pointsCategory ? (vpp.get(b.pointsCategory) ?? avgV) / avgV : 0;
-          const score = (preferPoints ? pts * weight * 100 : pts * weight * 5) + resPerHour + (o.professionMatch ? 1 : 0);
-          if (!best || score > best.score) best = { cat, b, minutes, score };
+          let score = (preferPoints ? pts * weight * 100 : pts * weight * 5) + resPerHour + (o.professionMatch ? 1 : 0);
+          // A material we are short of (blocking a level up or upgrade) beats points for now.
+          const forNeed = b.producesResource && this.needed?.get(b.producesResource) > 0 && !gathering.has(b.producesResource);
+          if (forNeed) score += 1e6 + resPerHour * 100;
+          // Gathering a missing material only needs a short shift (10 min still earns points).
+          const m = forNeed ? Math.min(minutes, Math.max(this.s.get('minShift'), 10)) : minutes;
+          if (!best || score > best.score) best = { cat, b, minutes: m, score, forNeed };
         }
       }
       if (!best) break;
@@ -521,7 +559,8 @@ export class Engine {
         this.stats.jobsStarted++;
         capacity--;
         free.set(best.b.id, free.get(best.b.id) - 1);
-        this.log(`⛏️ ${best.cat.name} kerja di ${best.b.name} ${best.minutes} menit`);
+        this.log(`⛏️ ${best.cat.name} kerja di ${best.b.name} ${best.minutes} menit${best.forNeed ? ` (cari ${best.b.producesResource} untuk level up/upgrade)` : ''}`);
+        if (best.forNeed) gathering.add(best.b.producesResource);   // one gatherer per material is enough
         if (this.inTutorial() && r.job?.fastTrack?.free) await this.try('free fast track', () => this.g.fastTrack(r.job.id, '0.000000000000000000'), { quiet: true });
       }
     }
