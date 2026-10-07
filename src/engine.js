@@ -273,11 +273,15 @@ export class Engine {
       if (!cat.canAttemptUpgrade || cat.pendingUpgradeId || cat.activity !== 'IDLE') continue;
       const q = await this.try('quote', () => this.g.upgradeQuote(cat.id, 0), { quiet: true });
       if (!q?.canUpgrade) continue;
-      const cost = n(q.costs.catCost);
+      // Pick the chance with the lowest expected $PAWS per success. Free levels (L1-3) cost 0 at
+      // every chance, so that is 100%. For paid levels, cost/chance is lowest at the base chance
+      // (e.g. 150 @80% = 187 per success vs 375 @100%); a failure keeps level and XP.
+      const best = [...q.stops].sort((a, b) => n(a.catCost) / a.chanceBps - n(b.catCost) / b.chanceBps || b.chanceBps - a.chanceBps)[0];
+      const cost = n(best.catCost);
       if (cost > 0 && !(this.s.get('levelUpSpendPaws') && this.canSpend(cost))) continue;
-      const pct = Math.round(q.chance.finalBps / 100);
-      const r = await this.try(`level up ${cat.name}`, () => this.g.startUpgrade(cat.id, pct, q.costs.catCost));
-      if (r) this.log(`📈 Level up ${cat.name} → ${q.targetLevel} dimulai (peluang ${pct}%, biaya ${cost} PAWS)`);
+      const pct = Math.round(best.chanceBps / 100);
+      const r = await this.try(`level up ${cat.name}`, () => this.g.startUpgrade(cat.id, pct, best.catCost));
+      if (r) this.log(`📈 Level up ${cat.name} → L${q.targetLevel} dimulai (peluang ${pct}%, biaya ${cost} PAWS)`);
     }
   }
 

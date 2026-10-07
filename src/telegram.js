@@ -10,7 +10,7 @@ const ELIG_TEXT = {
   TUTORIAL_INCOMPLETE: () => 'tutorial belum selesai (bot otomatis)',
   CAT_LEVEL_TOO_LOW: (r) => `belum ada kucing level ${r.minCatLevel}+ (bot otomatis level up)`,
   NOT_ENOUGH_ACTIVITY: (r) => `kurang dari ${r.minClaimedJobs} shift penghasil poin yang diklaim (bot pakai shift 10 menit dulu)`,
-  NO_SPEND_OR_STAKE: (r) => `$PAWS milikmu yang dibelanjakan/di-stake kurang dari ${num(r.minSpendOrDeposit)} (Wallet → Beli PAWS, lalu level up/stake)`,
+  NO_SPEND_OR_STAKE: (r) => `PAWS yang dibelanjakan di game/di-stake < ${num(r.minSpendOrDeposit)} (deposit & beli di Market tidak dihitung; level up, upgrade, rekrut, permit, repair, nap, fast track dihitung)`,
   RISK_SCORE: () => 'akun sedang direview',
   ACCOUNT_FROZEN: () => 'akun dibekukan',
   REWARDS_HOLD: () => 'reward ditahan',
@@ -206,10 +206,10 @@ export class TelegramUI {
       line(!has('TUTORIAL_INCOMPLETE') && me?.user?.tutorialCompleted !== false, 'Tutorial selesai'),
       line(!has('CAT_LEVEL_TOO_LOW'), `Kucing level ${ru.minCatLevel}+ (tertinggi L${maxLvl})`),
       line(!has('NOT_ENOUGH_ACTIVITY'), `${ru.minClaimedJobs} shift penghasil poin diklaim${claimed !== null ? ` (${Math.min(claimed, ru.minClaimedJobs)}/${ru.minClaimedJobs})` : ''} — shift ≥10 menit di stasiun 🎁; shift 3 menit tutorial tidak dihitung`),
-      line(!has('NO_SPEND_OR_STAKE'), `Belanja/stake ${num(ru.minSpendOrDeposit)} $PAWS milikmu — Wallet → Beli PAWS lalu level up/stake`),
+      line(!has('NO_SPEND_OR_STAKE'), `Belanja ${num(ru.minSpendOrDeposit)} $PAWS di dalam game (level up, upgrade, rekrut, permit, repair, nap, fast track) atau stake — deposit &amp; beli di Market tidak dihitung`),
     ];
     if (ru.minAccountAgeHours) rows.push(line(!has('ACCOUNT_TOO_NEW'), `Akun minimal ${ru.minAccountAgeHours} jam`));
-    for (const r of el.reasons.filter((x) => !['TUTORIAL_INCOMPLETE', 'CAT_LEVEL_TOO_LOW', 'NOT_ENOUGH_ACTIVITY', 'NO_SPEND_OR_STAKE', 'ACCOUNT_TOO_NEW'].includes(x))) rows.push(line(false, ELIG_TEXT[r]?.(ru) ?? r));
+    for (const r of el.reasons.filter((x) => !['TUTORIAL_INCOMPLETE', 'CAT_LEVEL_TOO_LOW', 'NOT_ENOUGH_ACTIVITY', 'NO_SPEND_OR_STAKE', 'ACCOUNT_TOO_NEW'].includes(x))) rows.push(line(false, esc(ELIG_TEXT[r]?.(ru) ?? r)));
     return `${el.eligible ? '✅ <b>Eligible reward</b>' : '⛔ <b>Belum eligible reward</b>'}\n${rows.join('\n')}`;
   }
 
@@ -368,7 +368,8 @@ XP ${bar(q.xp.current, q.xp.required)} ${q.xp.current}/${q.xp.required} (kucing 
 Biaya: ${num(q.costs.catCost)} PAWS + ${esc(Object.entries(q.costs.resources).map(([k, v]) => `${v} ${k}`).join(', '))} · persiapan ${dur(q.prepSeconds)}
 Peluang dasar ${q.chance.baseBps / 100}% (bisa dinaikkan sampai 100% dengan biaya lebih)
 Bisa sekarang: ${q.canUpgrade ? '✅' : `⛔ ${esc(blockers(q.blockers))}`}
-Gagal = PAWS hangus, level &amp; XP aman. Auto level up: ${ui.s.get('autoLevelUp') ? 'ON' : 'OFF'}${ui.s.get('levelUpSpendPaws') ? ' (boleh bayar PAWS)' : ' (hanya yang gratis)'}
+XP hanya didapat dari kerja shift (tidak ada item XP). L1-3 gratis (peluang 100% juga gratis); L4+ wajib PAWS + XP, PAWS bukan pengganti XP.
+Gagal = PAWS &amp; resource hangus, level &amp; XP aman, peluang berikutnya +${ui.e.cfg.upgrade.resolveStepPct}% (maks +${ui.e.cfg.upgrade.resolveMaxPct}%). Bot memilih peluang dengan biaya rata-rata per sukses termurah. Auto level up: ${ui.s.get('autoLevelUp') ? 'ON' : 'OFF'}${ui.s.get('levelUpSpendPaws') ? ' (boleh bayar PAWS)' : ' (hanya yang gratis)'}
 Produksi/jam: ${q.gain?.at?.perHour?.now ?? '-'} → ${q.gain?.at?.perHour?.after ?? '-'}${q.gain?.at?.points ? ` · poin/jam ${q.gain.at.points.perHour.now} → ${q.gain.at.points.perHour.after}` : ''}`,
         kb: ui.nav(...(q.canUpgrade ? rows : []), [ui.btn('⬅️ Kembali', () => ui.catScreen(catId))]),
       };
@@ -743,7 +744,12 @@ ${subs || 'Belum ada submission.'}`,
   // ----- permits & recruit
   async permitScreen() {
     this.panelScreen = this.permitScreen;
-    const [pm, rc] = await Promise.all([this.g.permits(), this.g.recruitments()]);
+    const [pm, rc, floor] = await Promise.all([this.g.permits(), this.g.recruitments(), this.g.marketFloor().catch(() => null)]);
+    // Expected market value of one recruit: official odds x current floor per rarity.
+    const odds = Object.entries(rc.oddsWithLuck ?? rc.odds ?? {});
+    const ev = floor ? odds.reduce((a, [r, bps]) => a + (bps / 10000) * n(floor.byRarity?.[r]), 0) : 0;
+    const evNoMythic = floor ? odds.filter(([r]) => r !== 'MYTHIC').reduce((a, [r, bps]) => a + (bps / 10000) * n(floor.byRarity?.[r]), 0) : 0;
+    const oddsLine = odds.map(([r, bps]) => `${RARITY_ICON[r] ?? ''}${(bps / 100).toFixed(2).replace(/\.?0+$/, '')}%`).join(' ');
     const now = this.g.c.now();
     const act = (pm.active ?? []).map((p) => `• permit ${esc(p.status)} ${p.completesAt ? until(p.completesAt, now) : ''}`).join('\n');
     const ract = (rc.active ?? []).map((r) => `• rekrut ${esc(r.status)} ${until(r.readyAt, now)}`).join('\n');
@@ -765,6 +771,8 @@ Fragment: ${frag}
 ${act}
 
 🍺 <b>Tavern</b> · kucing ke-${rc.ladder.sequence} · ${dur(rc.durationSeconds)}
+Peluang: ${oddsLine}
+💹 Nilai rata-rata 1 rekrut di market ≈ <b>${num(ev, 0)} PAWS</b> (tanpa Mythic ${num(evNoMythic, 0)}) vs biaya ${num(rc.costs.cat, 0)}. Kucing hasil rekrut pakai PAWS bisa dijual setelah ${this.e.cfg.recruitment.tradeCooldownHours} jam; hasil rekrut gratis/ticket tidak bisa dijual.
 ${rc.canStart ? '✅ bisa rekrut' : `⛔ ${esc(blockers(rc.blockers))}`} · pity ${rc.pity.count}/${rc.pity.everyN} (${rc.pity.minRarity}+)
 ${ract}`,
       kb: this.nav(...rows),
@@ -909,7 +917,17 @@ Kucing <b>bukan NFT</b>: kucing hanya ada di server game (jual-beli lewat Market
 <b>8. Membership (pass bulanan)</b>
 50 USDG/30 hari → ikut pool khusus member. Ronde lalu median member dapat ±5.000 PAWS + ±$5,7 saham per ronde 12 jam (cek angka terbaru di menu Membership).
 
-<b>9. Cara dapat PAWS</b>
+<b>9. Cara dapat kucing</b>
+• Gratis: starter cat + 1 kredit rekrut pertama (dipakai otomatis saat tutorial), dan Cat Pack ticket dari event (tidak bisa dijual).
+• Rekrut di Tavern (1500 PAWS, acak; nilai rata-rata di market sering &gt; biaya, lihat menu Permit &amp; Rekrut), pity RARE+ tiap 10 rekrut.
+• Beli di Market (paling murah untuk mengisi slot kerja) atau Trade P2P.
+Tidak ada shop/chest/bundle berbayar; satu-satunya pass berbayar adalah Membership.
+Lebih banyak kucing hanya berguna sampai batas kucing kerja di lahanmu (3/5/8/12/20 per tier) dan slot stasiun. Setelah penuh, perluas lahan.
+
+<b>10. Belanja yang dihitung untuk syarat reward</b>
+Kata game: "150 $PAWS of your own spent or staked: a deposit does not count". Yang dihitung: PAWS yang dihabiskan di game (level up, upgrade, rekrut, permit, repair, nap, fast track, perluas lahan) atau di-stake. Deposit dan beli kucing di Market tidak dihitung. Termurah + berguna: level up kucing L3→L4 (150 PAWS).
+
+<b>11. Cara dapat PAWS</b>
 Beli di pool (Wallet → Beli), jual kucing di Market, reward pool $PAWS tiap ronde, referral, dan membership pool.`,
       kb: this.nav([this.btn('🎁 Lihat pool reward', () => this.rewardsScreen), this.btn('🛒 Market', () => this.marketScreen)]),
     };

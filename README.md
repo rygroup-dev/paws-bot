@@ -167,6 +167,13 @@ Game balance, on-chain ETH / PAWS / USDG, live $PAWS price, deposits/withdrawals
 
 Rewards: 7 tokenized stocks, the $PAWS pool, SPCX for creators. Cats are not NFTs; they live in the game and are traded on its marketplace.
 
+### Game facts the bot is built on (read from the game's own config and texts)
+
+- **What counts as "spent"**: $PAWS spent *in the game* (level ups, upgrades, recruiting, permits, repairs, naps, fast tracks, land) or staked. *"A deposit does not count"*, and marketplace purchases go to another player, so they don't count either.
+- **Level ups**: XP only comes from working shifts (60 XP per hour). L1→L3 are free, and 100% chance is free too, so the bot always takes 100%. From L4, $PAWS is required on top of XP (150 / 225 / 300 / 450 / 600 by level band); $PAWS does not replace XP. Base chance 80% → 50% by level. A failure loses the $PAWS and materials but keeps level and XP, and adds +2% (max +10%) to the next try. The bot pays the base chance because it has the lowest cost per success (150 @ 80% ≈ 187 vs 375 @ 100%). Each level adds +3.47% output, up to your land tier's max effective level (10/20/30/40/50).
+- **Getting cats**: the starter and your first recruit are free (account-bound). Event Cat Pack tickets give account-bound cats. Recruiting in the Tavern costs 1,500 $PAWS with official odds 51.75 / 27 / 14 / 6 / 1 / 0.25% (Common → Mythic), plus a guaranteed Rare+ every 10th recruit; the Permit & Rekrut screen shows a recruit's live expected market value. Or buy on the marketplace, usually the cheapest way to fill a slot. There is no shop, chest or bundle; the only paid pass is Membership.
+- **More cats help up to your land's working limit** (3 / 5 / 8 / 12 / 20) and free station slots. After that, expand the land.
+
 ---
 
 ## 🛠 Tools
