@@ -1,0 +1,18 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# sessions, settings, account dumps, probe/explore output, browser profile
+data/
+
+# captures / audits
+*.har
+*.har.json
+explore/
+probe/
+
+# runtime & deps
+node_modules/
+.runtime/
+*.log

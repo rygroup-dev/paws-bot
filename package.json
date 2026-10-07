@@ -1,0 +1,18 @@
+{
+    "name":  "paws-bot",
+    "version":  "1.0.0",
+    "private":  true,
+    "type":  "module",
+    "scripts":  {
+                    "start":  "node src/index.js",
+                    "login":  "node src/human.js",
+                    "explore":  "node src/explore.js",
+                    "probe":  "node src/probe.js",
+                    "uitest":  "node src/uitest.js"
+                },
+    "dependencies":  {
+                         "dotenv":  "^18.0.6",
+                         "viem":  "^2.57.3",
+                         "ws":  "^8.22.0"
+                     }
+}
