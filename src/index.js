@@ -62,6 +62,7 @@ const engine = new Engine({
 });
 
 engine.chain = new Chain(client, engine.g);
+writeLog(`${new Date().toLocaleTimeString('id-ID', { hour12: false })} 🚀 Bot mulai jalan (pid ${process.pid})`);
 
 if (process.env.TELEGRAM_BOT_TOKEN) {
   tg = new TelegramUI({ token: process.env.TELEGRAM_BOT_TOKEN, chatId: process.env.TELEGRAM_CHAT_ID, engine, settings });

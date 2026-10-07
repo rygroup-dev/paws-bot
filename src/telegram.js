@@ -880,8 +880,10 @@ Semua aksi yang memakai PAWS/USDG/ETH selalu minta konfirmasi ✅ dulu.`,
 
   async logScreen() {
     this.panelScreen = this.logScreen;
-    const lines = this.e.logs.slice(-25).map(esc).join('\n');
-    return { text: `📋 <b>Log terakhir</b>\n<pre>${lines || '-'}</pre>`.slice(0, 4000), kb: this.nav() };
+    const st = this.e.stats;
+    const lines = this.e.logs.slice(-22).map(esc).join('\n');
+    const head = `${this.s.get('running') ? '🟢 jalan' : '🔴 pause'} · siklus terakhir ${ago(st.lastTick)} · berikutnya ${st.nextTick ? until(new Date(st.nextTick).toISOString()) : '-'}\n${esc(this.e.statusLine())}`;
+    return { text: `📋 <b>Log</b>\n${head}\n<pre>${lines || 'Belum ada kejadian (kucing sedang shift, tidak ada yang perlu di-claim).'}</pre>`.slice(0, 4000), kb: this.nav() };
   }
 
   async strategyScreen() {

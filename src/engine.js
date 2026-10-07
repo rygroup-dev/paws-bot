@@ -133,7 +133,10 @@ export class Engine {
       await this.refresh();
       this.stats.lastTick = Date.now();
       this.stats.lastError = null;
-      return this.nextWake();
+      const wait = this.nextWake();
+      this.stats.nextTick = Date.now() + wait;
+      this.heartbeat();
+      return wait;
     } finally {
       this.busy = false;
     }
@@ -296,6 +299,21 @@ export class Engine {
       const r = await this.try(`level up ${cat.name}`, () => this.g.startUpgrade(cat.id, pct, best.catCost));
       if (r) this.log(`📈 Level up ${cat.name} → L${q.targetLevel} dimulai (peluang ${pct}%, biaya ${cost} PAWS)`);
     }
+  }
+
+  // One-line status every hour so a quiet log still shows the bot is alive and what's next.
+  statusLine() {
+    const p = this.state.property;
+    const t = (iso) => new Date(iso).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false });
+    const jobs = (p?.activeJobs ?? []).map((j) => `${j.catName} ${j.buildingType} s/d ${t(j.endsAt)}`).join(' · ');
+    const reasons = this.state.rewards?.eligibility?.reasons ?? [];
+    return `🕒 Status: ${p?.activeCats?.working ?? 0}/${p?.activeCats?.limit ?? '-'} kucing kerja${jobs ? ` (${jobs})` : ''} · ${Math.floor(this.balance())} PAWS · ${reasons.length ? `belum eligible: ${reasons.join(', ')}` : 'eligible reward ✅'}`;
+  }
+
+  heartbeat() {
+    if (Date.now() - (this.lastBeat ?? 0) < 3600000) return;
+    this.lastBeat = Date.now();
+    this.log(this.statusLine());
   }
 
   // Record missing materials (requirement items of kind RESOURCE) so farming can produce them.
