@@ -51,8 +51,13 @@ export class Chain {
     this.account = client.account;
   }
 
-  async init() {
-    if (this.setup) return;
+  // Shared by concurrent callers (the wallet screen asks for balances and price at once).
+  init() {
+    this.initP ??= this.load().catch((e) => { this.initP = null; throw e; });
+    return this.initP;
+  }
+
+  async load() {
     const buy = await this.c.get('/buy');
     const s = buy.setup;
     this.buyVisible = buy.visible;
@@ -61,7 +66,14 @@ export class Chain {
     // Official RPC first; some networks (e.g. ISP/office "internet sehat" filters) block it,
     // so fall back to dRPC's public Robinhood Chain endpoint (verified chainId 4663).
     const urls = [...new Set([process.env.RPC_URL, s.chain.rpcUrl, 'https://robinhood.drpc.org'].filter(Boolean))];
-    const transport = fallback(urls.map((u) => http(u, { retryCount: 1, timeout: 20000 })));
+    // Probe once and put the RPCs that answer first: on a network that blocks one, every call
+    // would otherwise wait for it to fail before trying the next (seconds per screen).
+    const up = await Promise.all(urls.map((u) => fetch(u, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(5000),
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }),
+    }).then((r) => r.json()).then((j) => !!j.result).catch(() => false)));
+    const ordered = [...urls.filter((_, i) => up[i]), ...urls.filter((_, i) => !up[i])];
+    const transport = fallback(ordered.map((u) => http(u, { retryCount: 1, timeout: 20000 })));
     this.pub = createPublicClient({ chain: this.chain, transport });
     this.wal = createWalletClient({ account: this.account, chain: this.chain, transport });
     this.key = { currency0: getAddress(s.pool.currency0), currency1: getAddress(s.pool.currency1), fee: s.pool.fee, tickSpacing: s.pool.tickSpacing, hooks: getAddress(s.pool.hooks) };

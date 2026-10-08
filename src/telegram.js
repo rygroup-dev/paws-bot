@@ -69,7 +69,9 @@ export class TelegramUI {
   }
 
   async show(screen, msgId = this.panel) {
+    const seq = (this.renderSeq = (this.renderSeq ?? 0) + 1);
     const { text, kb } = await screen.call(this);
+    if (seq !== this.renderSeq) return;   // a newer tap is already rendering
     const markup = { inline_keyboard: kb ?? [] };
     if (msgId) {
       try {
@@ -98,9 +100,11 @@ export class TelegramUI {
     const poll = async () => {
       try {
         const ups = await this.call('getUpdates', { offset: this.offset, timeout: 50, allowed_updates: ['message', 'callback_query'] });
+        // Handle updates without waiting for them: a slow screen (several game API calls) must not
+        // hold up the next tap. show() drops a render that a newer tap has overtaken.
         for (const u of ups ?? []) {
           this.offset = u.update_id + 1;
-          await this.handle(u).catch((e) => console.error('TG handler:', e.message));
+          this.handle(u).catch((e) => console.error('TG handler:', e.message));
         }
       } catch (e) {
         console.error(e.message);
@@ -123,11 +127,24 @@ export class TelegramUI {
     if (u.callback_query) {
       const q = u.callback_query;
       const fn = this.actions.get((q.data ?? '').slice(2));
-      this.call('answerCallbackQuery', { callback_query_id: q.id, text: fn ? undefined : 'Menu kadaluarsa, buka /menu' }).catch(() => {});
-      if (!fn) return;
-      this.panel = q.message.message_id;
-      const next = await this.guard(fn);
-      if (typeof next === 'function') await this.show(next);
+      // Answer once the new screen is up, so the button's loading spinner shows while it loads
+      // (and after 8 s at the latest, before Telegram gives up on the query).
+      let answered = false;
+      const answer = () => {
+        if (answered) return;
+        answered = true;
+        this.call('answerCallbackQuery', { callback_query_id: q.id, text: fn ? undefined : 'Menu kadaluarsa, buka /menu' }).catch(() => {});
+      };
+      if (!fn) return answer();
+      const timer = setTimeout(answer, 8000);
+      try {
+        this.panel = q.message.message_id;
+        const next = await this.guard(fn);
+        if (typeof next === 'function') await this.show(next);
+      } finally {
+        clearTimeout(timer);
+        answer();
+      }
       return;
     }
 
@@ -194,13 +211,13 @@ export class TelegramUI {
   }
 
   // Reward eligibility as a checklist with real progress (GET /rewards + /jobs?status=CLAIMED).
-  async eligibilityChecklist(rw) {
+  async eligibilityChecklist(rw, jobsP = this.g.jobs('CLAIMED')) {
     const el = rw.eligibility;
     const ru = el.rules;
     const has = (r) => el.reasons.includes(r);
     const me = this.state().me;
     const maxLvl = Math.max(0, ...(this.state().cats ?? []).map((c) => c.level));
-    const claimed = await this.g.jobs('CLAIMED').then((r) => r.jobs.filter((j) => j.snapshot?.rewardEligible && n(j.result?.gamePoints) > 0).length).catch(() => null);
+    const claimed = await jobsP.then((r) => r.jobs.filter((j) => j.snapshot?.rewardEligible && n(j.result?.gamePoints) > 0).length).catch(() => null);
     const line = (ok, text) => `${ok ? '✅' : '❌'} ${text}`;
     const rows = [
       line(!has('TUTORIAL_INCOMPLETE') && me?.user?.tutorialCompleted !== false, 'Tutorial selesai'),
@@ -348,7 +365,10 @@ Status: ${ACT_ICON[c.activity] ?? c.activity}${job ? ` di ${esc(job.buildingType
         ui.btn(c.isProtected ? '🛡 Lepas protect' : '🛡 Protect', ui.doThen('Protect diubah', () => ui.g.protect(id, !c.isProtected), ui.catScreen(id))),
         ui.btn('✏️ Rename', ui.ask(`Nama baru untuk ${esc(c.name)}:`, async (t) => { await ui.g.rename(id, t); await ui.e.refresh(); ui.flash = `✅ Rename ke ${t}`; return ui.catScreen(id); })),
       ]);
-      if (c.isTradable && !c.listingId) rows.push([ui.btn('💲 Jual di market', () => ui.sellScreen(id))]);
+      // The server refuses a listing during the trade cooldown after a cat arrives.
+      const cooldown = c.tradeCooldownUntil && new Date(c.tradeCooldownUntil).getTime() > ui.g.c.now() ? c.tradeCooldownUntil : null;
+      if (c.isTradable && !c.listingId && !cooldown) rows.push([ui.btn('💲 Jual di market', () => ui.sellScreen(id))]);
+      if (c.isTradable && !c.listingId && cooldown) rows.push([ui.btn(`🔒 Bisa dijual dalam ${until(cooldown, ui.g.c.now())}`, () => ui.catScreen(id))]);
       if (c.listingId) rows.push([ui.btn('🏷️ Batalkan listing', ui.doThen('Listing dibatalkan', () => ui.g.cancelListing(c.listingId), ui.catScreen(id)))]);
       if (c.canRelease) rows.push([ui.btn('🗑 Release (hapus)', async () => {
         const pv = await ui.g.releasePreview(id);
@@ -419,16 +439,24 @@ Produksi/jam: ${q.gain?.at?.perHour?.now ?? '-'} → ${q.gain?.at?.perHour?.afte
       const floor = await ui.g.marketFloor();
       const fr = n(floor.byRarity?.[c.rarity]);
       const fp = n(floor.byProfession?.[c.profession]);
-      const list = (price) => ui.confirm(`Jual <b>${esc(c.name)}</b> seharga <b>${num(price)} $PAWS</b>? (fee ${floor.feeBps / 100}%, terima ±${num(price * (1 - floor.feeBps / 10000))})`, `Listing ${num(price)} PAWS`, () => ui.g.listCat(catId, price.toFixed(2)), ui.catScreen(catId));
+      // A working cat can't be listed (server: CAT_BUSY), so its shift is cancelled first; the
+      // shift's output so far is lost, which the screen and the confirmation say.
+      const working = c.activity === 'WORKING' && c.currentJobId;
+      const listCat = async (price) => {
+        if (working) await ui.g.cancelJob(c.currentJobId);
+        return ui.g.listCat(catId, price.toFixed(2));
+      };
+      const warn = working ? '\n⚠️ Shift yang sedang jalan dibatalkan dulu (hasil shift ini hilang).' : '';
+      const list = (price) => ui.confirm(`Jual <b>${esc(c.name)}</b> seharga <b>${num(price)} $PAWS</b>? (fee ${floor.feeBps / 100}%, terima ±${num(price * (1 - floor.feeBps / 10000))})${warn}`, `Listing ${num(price)} PAWS`, () => listCat(price), ui.catScreen(catId));
       const opts = [fr * 0.95, fr, fr * 1.1, fr * 1.25].filter((x) => x >= 1);
       return {
-        text: `💲 <b>Jual ${esc(c.name)}</b> (${c.rarity} ${c.profession} L${c.level})\nFloor ${c.rarity}: <b>${num(fr)}</b> · floor ${c.profession}: ${num(fp)}\nPilih harga cepat atau ketik sendiri.`,
+        text: `💲 <b>Jual ${esc(c.name)}</b> (${c.rarity} ${c.profession} L${c.level})\nFloor ${c.rarity}: <b>${num(fr)}</b> · floor ${c.profession}: ${num(fp)}\nPilih harga cepat atau ketik sendiri.${warn}`,
         kb: ui.nav(
           opts.map((x) => ui.btn(`${num(x, 0)}`, list(Math.round(x)))),
           [ui.btn('✏️ Harga custom', ui.ask('Harga jual dalam $PAWS (contoh 1250):', async (t) => {
             const price = Number(t.replace(',', '.'));
             if (!(price >= 1)) throw new Error('Harga tidak valid');
-            await ui.g.listCat(catId, price.toFixed(2));
+            await listCat(price);
             await ui.e.refresh();
             ui.flash = `✅ ${c.name} dijual ${price} PAWS`;
             return ui.catScreen(catId);
@@ -513,26 +541,49 @@ ${nl?.unlocks ? `Buka: ${esc(nl.unlocks.join(', '))}` : ''}`;
   // ----- rewards
   async rewardsScreen() {
     this.panelScreen = this.rewardsScreen;
+    // Fetched alongside /rewards instead of one after another.
+    const earnedP = this.g.rewardsEarned().catch(() => null);
+    const jobsP = this.g.jobs('CLAIMED');
+    jobsP.catch(() => {});
     const rw = await this.g.rewards();
     this.e.state.rewards = rw;
     const now = this.g.c.now();
-    const pools = rw.pools.map((x) => `• <b>${x.symbol}</b> ${esc(x.category)}: ${num(x.myPoints)} / ${num(x.totalPoints, 0)} pts · share ${x.estimatedSharePct}% · hadiah ${num(x.epochRewardAmount, 4)} ${x.symbol} (~$${num(x.prizeQuote)})`).join('\n');
+    // The API calls in-game $PAWS "CAT" (balances.cat, poolKind CAT); show it as PAWS.
+    const sym = (s) => (s === 'CAT' ? 'PAWS' : esc(s));
+    const isMember = !!rw.membership?.member;
+    const stationName = (t) => esc(String(t).toLowerCase().replace(/_/g, ' '));
+    // Per stock pool: my points, players in it, my share and what that share is worth now
+    // (prizeQuote = pool value in $), the whole prize, and which stations earned my points.
+    const pools = rw.pools.filter((x) => x.enabled !== false).map((x) => {
+      const mine = n(x.myPoints) > 0;
+      const estUsd = (n(x.estimatedSharePct) / 100) * n(x.prizeQuote);
+      const from = (x.contributions ?? []).map((c) => `${stationName(c.buildingType)} ${c.shifts}x`).join(', ');
+      return `${mine ? '•' : '◦'} <b>${x.symbol}</b> ${num(x.myPoints)} / ${num(x.totalPoints, 0)} pts · ${x.contributors} org · hadiah ${num(x.epochRewardAmount, 4)} (~$${num(x.prizeQuote, 0)})`
+        + (mine ? `\n   ↳ share ${x.estimatedSharePct}% ≈ ${num(x.estimatedShare, 6)} ${x.symbol} (~$${num(estUsd, 3)})${!isMember && n(x.memberSharePct) ? ` · kalau member ${x.memberSharePct}%` : ''}${from ? ` · dari ${from}` : ''}` : '');
+    }).join('\n');
     const cp = rw.catPool;
-    const allocs = (rw.allocations ?? []).slice(0, 12).map((a) => `• R#${a.epochNumber} ${esc(a.symbol)} <b>${num(a.amount, 6)}</b> · ${esc(a.status)}${a.collect ? `/${esc(a.collect)}` : ''}${a.ineligibleReason ? ` ⛔${esc(a.ineligibleReason)}` : ''}`).join('\n');
-    const earned = await this.g.rewardsEarned().catch(() => null);
-    const el = rw.eligibility;
-    return {
-      text: `${this.takeFlash()}🎁 <b>Reward ronde #${rw.currentEpoch.epochNumber}</b> · sisa ${until(rw.currentEpoch.endsAt, now)}
-${await this.eligibilityChecklist(rw)}
+    const lc = rw.luckyCat;
+    const ce = rw.closingEpoch;
+    const credits = (rw.credits ?? []).slice(0, 8).map((c) => `• R#${c.epochNumber} ${sym(c.symbol)} <b>${num(c.amount, c.symbol === 'CAT' ? 2 : 8)}</b> · ${c.symbol === 'CAT' ? '🎮 masuk saldo game' : c.txHash ? `👛 masuk wallet (tx ${c.txHash.slice(0, 10)}…)` : esc(c.label ?? c.status)}`).join('\n');
+    const allocs = (rw.allocations ?? []).slice(0, 10).map((a) => `• R#${a.epochNumber} ${sym(a.symbol)} <b>${num(a.amount, a.symbol === 'CAT' ? 2 : 8)}</b> · ${esc(a.status)}${a.collect ? `/${esc(a.collect)}` : ''}${a.ineligibleReason ? ` ⛔${esc(a.ineligibleReason)}` : ''}`).join('\n');
+    const earned = await earnedP;
+    const rounds = (earned?.rounds ?? []).slice(0, 5).map((r) => `R#${r.epochNumber}: $${num(r.stockUsd, 3)} saham + ${num(r.paws)} PAWS`).join(' · ');
+    const head = `${this.takeFlash()}🎁 <b>Reward ronde #${rw.currentEpoch.epochNumber}</b> · sisa ${until(rw.currentEpoch.endsAt, now)}${ce ? `\n⏳ Ronde #${ce.epochNumber} sedang dihitung (${esc(ce.status)})` : ''}
+${await this.eligibilityChecklist(rw, jobsP)}
 
+<b>Pool saham</b> (• = ada poin saya)
 ${pools}
-🐾 <b>$PAWS pool</b>: ${num(cp?.myPoints)} / ${num(cp?.totalPoints, 0)} pts · total ${num(cp?.amount, 0)} PAWS · share ${cp?.estimatedSharePct ?? '-'}%
-${rw.membership?.available ? `👑 Membership ${num(rw.membership.price)} ${rw.membership.quoteAsset}/${rw.membership.durationDays} hari ${rw.membership.member ? '(aktif)' : ''}` : ''}
+🐾 <b>$PAWS pool</b>: ${num(cp?.myPoints)} / ${num(cp?.totalPoints, 0)} pts · ${cp?.contributors ?? '-'} org · total ${num(cp?.amount, 0)} PAWS
+   ↳ share ${cp?.estimatedSharePct ?? '-'}% ≈ <b>${num(cp?.estimatedShare)} PAWS</b>${!isMember && n(cp?.memberSharePct) ? ` · kalau member ${cp.memberSharePct}%` : ''}
+${lc ? `🍀 Lucky Cat ronde ini: ${esc(lc.name)} (${esc(lc.rarity)} ${esc(lc.profession)}) milik ${esc(lc.ownerUsername)} · produksi x${n(lc.productionBps) / 10000}\n` : ''}${rw.membership?.available ? `👑 Membership ${num(rw.membership.price)} ${rw.membership.quoteAsset}/${rw.membership.durationDays} hari ${isMember ? `(aktif s/d ${esc(rw.membership.memberUntil ?? '-')})` : ''}${rw.membership.lastRound ? ` · median member R#${rw.membership.lastRound.epochNumber}: ${num(rw.membership.lastRound.medianPaws, 0)} PAWS + $${rw.membership.lastRound.medianStockUsd}` : ''}\n` : ''}${rw.treasury ? `🏦 Pendapatan game ronde ini: ${num(rw.treasury.revenueThisEpoch)} ${esc(rw.treasury.quoteAsset)}\n` : ''}
+💵 <b>Total didapat</b>: saham $${num(earned?.stockUsd, 3)} · PAWS ${num(earned?.paws)}${n(earned?.creatorUsd) ? ` · creator $${num(earned.creatorUsd)}` : ''}${rounds ? `\n${rounds}` : ''}
 
-💵 Total didapat: saham $${num(earned?.stockUsd)} · PAWS ${num(earned?.paws)}${n(earned?.creatorUsd) ? ` · creator $${num(earned.creatorUsd)}` : ''}
-
-<b>Alokasi</b> (${this.e.pendingAllocations(rw).length} menunggu claim):\n${allocs || '-'}
-<i>Saham (AAPL, COST, TSLA, ...) dikirim ke wallet lewat transaksi claim on-chain (gas ETH kecil).</i>`,
+<b>Riwayat masuk</b>:\n${credits || '-'}`;
+    const tail = `\n\n<b>Alokasi</b> (${this.e.pendingAllocations(rw).length} menunggu claim):\n${allocs || '-'}`;
+    const note = `\n<i>Saham (AAPL, COST, ...) dikirim ke wallet lewat claim on-chain (gas ETH kecil). Reward PAWS ("CAT" di API) masuk saldo game; ke wallet lewat Withdraw.</i>`;
+    return {
+      // Telegram caps a message at 4096 chars: drop the allocation list first if it doesn't fit.
+      text: (head + tail + note).length <= 4000 ? head + tail + note : head + note,
       kb: this.nav([this.btn('💰 Claim & collect semua', async () => { const d = await this.e.claimRewards(true); this.flash = d.length ? `✅ ${d.length} reward diproses` : 'ℹ️ Tidak ada reward yang bisa di-claim'; return this.rewardsScreen; }),
         this.btn(`Auto collect on-chain: ${this.s.get('autoCollectOnchain') ? 'ON' : 'OFF'}`, () => { this.s.toggle('autoCollectOnchain'); return this.rewardsScreen; })],
       [this.btn('👑 Membership', () => this.membershipScreen), this.btn('✍️ Creator', () => this.creatorScreen)]),

@@ -66,6 +66,8 @@ const engine = new Engine({
 });
 
 engine.chain = new Chain(client, engine.g);
+// Set up the chain connection now (picks a working RPC) so the first Wallet screen is not slow.
+engine.chain.init().catch(() => {});
 writeLog(`${new Date().toLocaleTimeString('id-ID', { hour12: false })} 🚀 Bot mulai jalan (pid ${process.pid})`);
 
 if (process.env.TELEGRAM_BOT_TOKEN) {

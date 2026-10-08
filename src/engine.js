@@ -3,6 +3,8 @@ import { ApiError } from './api.js';
 
 const n = (v) => Number(v ?? 0);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Longest material-gathering shift for a cat working outside its profession (minutes).
+const GATHER_OFF_MAX = 60;
 const ACK_STEPS = new Set(['WELCOME', 'MEET_THE_PLOT', 'TOWN_DIRECTORY', 'MANAGE_BUSINESS', 'FIRST_BUSINESS', 'MANAGE_CATS', 'CAT_RULES', 'GROW_YOUR_LAND', 'FINISH']);
 const VISIT_PLACE = {
   VISIT_TRAINER: 'TRAINER', VISIT_TAVERN: 'TAVERN', VISIT_REWARDS: 'REWARDS', VISIT_MARKET: 'MARKET',
@@ -435,8 +437,15 @@ export class Engine {
     for (const r of [...(rc.active ?? []), ...(rc.recruitments ?? [])]) {
       const ready = r.claimable || r.ready || (r.readyAt && new Date(r.readyAt).getTime() <= now) || (r.completesAt && new Date(r.completesAt).getTime() <= now);
       if (!ready || r.claimedAt) continue;
+      const known = new Set((this.state.cats ?? []).map((c) => c.id));
       const got = await this.try('claim recruit', () => this.g.claimRecruit(r.id));
-      const cat = got?.cat ?? got?.recruitment?.cat ?? got?.cats?.[0];
+      let cat = got?.cat ?? got?.recruitment?.cat ?? got?.cats?.[0];
+      // The claim reply doesn't always carry the cat: it is the one cat we didn't have before.
+      if (got && !cat?.rarity) {
+        const list = await this.try('cats', () => this.g.cats(), { quiet: true });
+        const cats = list?.cats ?? (Array.isArray(list) ? list : null);
+        if (cats) { this.state.cats = cats; cat = cats.find((c) => !known.has(c.id)) ?? cat; }
+      }
       if (got) this.log(`🐱 Kucing baru: ${cat?.name ?? 'cek menu Kucing'}${cat ? ` (${cat.rarity} ${cat.profession})` : ''}`, 'important');
     }
     if ((rc.active ?? []).some((r) => !r.claimedAt)) return;
@@ -554,7 +563,7 @@ export class Engine {
     // Materials already being gathered: a short shift (the gathering kind) on a station that makes
     // a needed material. Cats on long shifts don't count, their output lands hours later.
     const gathering = new Set((p.activeJobs ?? [])
-      .filter((j) => j.durationMinutes <= Math.max(this.s.get('minShift'), 10))
+      .filter((j) => j.durationMinutes <= Math.max(this.s.get('minShift'), GATHER_OFF_MAX))
       .map((j) => (p.buildings ?? []).find((b) => b.id === j.buildingId)?.producesResource)
       .filter((r) => r && this.needed?.has(r)));
     while (idle.length && capacity > 0) {
@@ -574,13 +583,18 @@ export class Engine {
           let score = (preferPoints ? pts * weight * 100 : pts * weight * 5) + resPerHour + (o.professionMatch ? 1 : 0);
           // A material we are short of (blocking a level up or upgrade) beats points for now.
           const forNeed = b.producesResource && this.needed?.get(b.producesResource) > 0 && !gathering.has(b.producesResource);
-          if (forNeed) score += 1e6 + resPerHour * 100;
+          // The cat whose profession makes this material gathers it (1.25x output); another cat
+          // only fills in when no such cat is idle.
+          if (forNeed) score += 1e6 + (o.professionMatch ? 1e5 : 0) + resPerHour * 100;
           // Gather with the shortest shift that covers what is missing at this station's rate
           // (10 min still earns points), never longer than the cat could otherwise work.
+          // A cat outside its profession gathers at most GATHER_OFF_MAX minutes, so it is soon
+          // back at a station that suits it instead of spending 8h at the wrong one.
           let m = minutes;
           if (forNeed) {
             const need = this.needed.get(b.producesResource);
-            const fits = this.durations().filter((d) => d >= this.s.get('minShift') && d <= minutes);
+            let fits = this.durations().filter((d) => d >= this.s.get('minShift') && d <= minutes);
+            if (!o.professionMatch) fits = fits.filter((d) => d <= GATHER_OFF_MAX).concat(fits.length && fits[0] > GATHER_OFF_MAX ? [fits[0]] : []);
             m = fits.find((d) => (resPerHour * d) / 60 >= need) ?? fits[fits.length - 1] ?? minutes;
           }
           if (!best || score > best.score) best = { cat, b, minutes: m, score, forNeed };
@@ -654,7 +668,8 @@ export class Engine {
       if (!r) continue;
       this.stats.rewardsClaimed++;
       done.push(r);
-      const what = `${r.amount ?? a.amount} ${r.symbol ?? a.symbol}`;
+      const s = r.symbol ?? a.symbol;
+      const what = `${r.amount ?? a.amount} ${s === 'CAT' ? 'PAWS' : s}`;   // API name for in-game $PAWS is CAT
       if (r.collected) this.log(`💰 Reward ${what} masuk wallet ${r.txHash ? `(tx ${r.txHash.slice(0, 10)}…)` : ''}`, 'important');
       else if (r.credited) this.log(`💰 Reward ${what} dikreditkan ke game`, 'important');
       else if (r.held) this.log(`⏳ Reward ${what} ditahan untuk review admin`, 'important');
