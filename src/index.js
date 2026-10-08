@@ -20,15 +20,19 @@ if (!process.env.PRIVATE_KEY) {
 // One bot per data folder: two copies would double every action and fight over Telegram updates.
 const lockFile = path.join(dataDir, 'bot.lock');
 fs.mkdirSync(dataDir, { recursive: true });
+// The running bot touches the lock every minute; a lock older than 3 minutes is left over from a
+// crash or power cut (after a reboot its pid may even belong to another program), so ignore it.
 try {
   const pid = Number(fs.readFileSync(lockFile, 'utf8'));
-  if (pid && pid !== process.pid) {
+  const fresh = Date.now() - fs.statSync(lockFile).mtimeMs < 180000;
+  if (pid && pid !== process.pid && fresh) {
     process.kill(pid, 0); // throws if that process is gone
     console.error(`Bot sudah jalan (pid ${pid}). Tutup dulu yang lama, atau hapus data/bot.lock kalau yakin tidak jalan.`);
     process.exit(1);
   }
 } catch {}
 fs.writeFileSync(lockFile, String(process.pid));
+setInterval(() => { try { const t = new Date(); fs.utimesSync(lockFile, t, t); } catch {} }, 60000).unref();
 const releaseLock = () => { try { if (Number(fs.readFileSync(lockFile, 'utf8')) === process.pid) fs.unlinkSync(lockFile); } catch {} };
 process.on('exit', releaseLock);
 for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => process.exit(0));

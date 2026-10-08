@@ -544,9 +544,12 @@ export class Engine {
     const vpp = new Map((this.state.rewards?.pools ?? []).map((pl) => [pl.category, n(pl.prizeQuote) / Math.max(1, n(pl.totalPoints))]));
     const avgV = [...vpp.values()].reduce((a, b) => a + b, 0) / Math.max(1, vpp.size) || 1;
     const rested = new Set();
-    // Materials an idle cat was sent to gather this tick. Cats already on long shifts don't count:
-    // their output only lands when the shift ends, so a short gathering shift is still worth it.
-    const gathering = new Set();
+    // Materials already being gathered: a short shift (the gathering kind) on a station that makes
+    // a needed material. Cats on long shifts don't count, their output lands hours later.
+    const gathering = new Set((p.activeJobs ?? [])
+      .filter((j) => j.durationMinutes <= Math.max(this.s.get('minShift'), 10))
+      .map((j) => (p.buildings ?? []).find((b) => b.id === j.buildingId)?.producesResource)
+      .filter((r) => r && this.needed?.has(r)));
     while (idle.length && capacity > 0) {
       let best = null;
       for (const b of stations) {
