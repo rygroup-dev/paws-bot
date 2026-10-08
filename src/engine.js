@@ -127,6 +127,7 @@ export class Engine {
       if (this.s.get('autoPermits')) await this.permitsAndStations();
       if (this.s.get('autoRecruit') || this.inTutorial()) await this.recruiting(false, !this.inTutorial());
       if (this.s.get('autoUpgradeBuildings')) await this.grow();
+      if (this.s.get('autoDepositWallet')) await this.slow('autoDeposit', 300000, () => this.autoDeposit());
       if (this.s.get('autoClaimRewards')) await this.claimRewards();
       else await this.slow('rewards', 120000, () => this.g.rewards()).then((rw) => { if (rw) this.state.rewards = rw; });
       if (this.s.get('autoFarm')) await this.farm();
@@ -261,6 +262,7 @@ export class Engine {
     }
     // cat level-up attempts waiting to resolve
     const ups = await this.try('upgrades', () => this.g.upgrades(), { quiet: true });
+    if (ups) this.state.upgrades = ups;
     for (const a of ups?.attempts ?? []) {
       if (a.resolvedAt) continue;
       const due = a.resolvable || (a.status === 'PREPARING' && new Date(a.readyAt).getTime() <= now);
@@ -461,14 +463,17 @@ export class Engine {
     const vpp = new Map((this.state.rewards?.pools ?? []).map((pl) => [pl.category, n(pl.prizeQuote) / Math.max(1, n(pl.totalPoints))]));
     const plan = [];
     const nt = p.nextTier;
-    if (nt?.canExpand && nt.requirements?.met) plan.push({ kind: 'land', name: `Lahan → ${nt.name}`, cost: nt.catCost, ready: true, prio: 0, reqs: nt.requirements?.items });
+    // The next land tier is the biggest step (more working cats, station slots, better stations),
+    // so it leads the plan as soon as we own enough cats; its materials are gathered meanwhile.
+    if (nt?.meetsCats) plan.push({ kind: 'land', name: `Lahan → ${nt.name}`, cost: nt.catCost, ready: !!(nt.canExpand && nt.requirements?.met), prio: 0, reqs: nt.requirements?.items });
     for (const b of p.buildings ?? []) {
       if (!b.pointsCategory || !b.nextLevel || b.type === 'HOUSE') continue;
       plan.push({ kind: 'building', id: b.id, name: `${b.name} L${b.nextLevel.level}`, cost: b.nextLevel.catCost, ready: !!b.nextLevel.canUpgrade, prio: 1, value: vpp.get(b.pointsCategory) ?? 0, reqs: b.nextLevel.requirements?.items });
     }
     const houseNeeded = nt?.requirements?.items?.some((i) => i.kind === 'HOUSE' && !i.met);
     const h = p.house?.nextLevel;
-    if (h && !p.house.upgrade && houseNeeded) plan.push({ kind: 'building', id: p.house.buildingId, name: `House L${h.level} (syarat lahan)`, cost: h.catCost, ready: !!h.requirements?.met, prio: 2, reqs: h.requirements?.items });
+    // A House level the land tier asks for comes right before the land itself.
+    if (h && !p.house.upgrade && houseNeeded) plan.push({ kind: 'building', id: p.house.buildingId, name: `House L${h.level} (syarat lahan)`, cost: h.catCost, ready: !!h.requirements?.met, prio: nt?.meetsCats ? -1 : 2, reqs: h.requirements?.items });
     plan.sort((a, b) => a.prio - b.prio || n(a.cost) - n(b.cost) || (b.value ?? 0) - (a.value ?? 0));
     return plan;
   }
@@ -495,8 +500,10 @@ export class Engine {
     if (this.s.get('autoBuyCats') && (await this.fillCatSlots())) return;
     const queue = p.propertyQueue ?? { used: 0, slots: 1 };
     if (queue.used >= queue.slots || p.expansion) return;
-    const top = this.growPlan()[0];
-    if (top && !top.ready) this.noteMissing(top.reqs);   // gather its materials while saving
+    const plan = this.growPlan();
+    const top = plan[0];
+    // Gather materials for the top target, and for the House + land step together.
+    for (const x of plan.filter((x, i) => !x.ready && (i === 0 || x.prio <= 0))) this.noteMissing(x.reqs);
     if (!top || !top.ready || !this.canSpend(top.cost)) return;   // save up for the best target
     const r = await this.try(`grow ${top.name}`, () => (top.kind === 'land' ? this.g.expand(top.cost) : this.g.upgradeBuilding(top.id, top.cost)));
     if (r) this.log(`🏗️ Upgrade ${top.name} dimulai (${n(top.cost)} PAWS)`, 'important');
@@ -568,8 +575,14 @@ export class Engine {
           // A material we are short of (blocking a level up or upgrade) beats points for now.
           const forNeed = b.producesResource && this.needed?.get(b.producesResource) > 0 && !gathering.has(b.producesResource);
           if (forNeed) score += 1e6 + resPerHour * 100;
-          // Gathering a missing material only needs a short shift (10 min still earns points).
-          const m = forNeed ? Math.min(minutes, Math.max(this.s.get('minShift'), 10)) : minutes;
+          // Gather with the shortest shift that covers what is missing at this station's rate
+          // (10 min still earns points), never longer than the cat could otherwise work.
+          let m = minutes;
+          if (forNeed) {
+            const need = this.needed.get(b.producesResource);
+            const fits = this.durations().filter((d) => d >= this.s.get('minShift') && d <= minutes);
+            m = fits.find((d) => (resPerHour * d) / 60 >= need) ?? fits[fits.length - 1] ?? minutes;
+          }
           if (!best || score > best.score) best = { cat, b, minutes: m, score, forNeed };
         }
       }
@@ -604,6 +617,23 @@ export class Engine {
         }
       }
     }
+  }
+
+  // ---------- wallet -> game
+  // $PAWS bought outside the bot lands in the wallet; the game only credits what is deposited
+  // into its vault, so move it in (approve + vault.deposit, a little ETH for gas).
+  async autoDeposit() {
+    if (!this.chain) return null;
+    const bal = await this.chain.balances().catch(() => null);
+    if (!bal || Number(bal.paws) < this.s.get('autoDepositMin')) return null;
+    if (Number(bal.eth) <= 0) { this.logOnce('dep-gas', `⚠️ Ada ${Math.floor(Number(bal.paws))} PAWS di wallet tapi ETH untuk gas kosong`); return null; }
+    this.log(`⬇️ Auto deposit ${Number(bal.paws).toFixed(2)} PAWS dari wallet ke game...`, 'important');
+    const r = await this.try('auto deposit', () => this.chain.deposit(bal.raw.paws, (m) => this.log(m)));
+    if (r) {
+      this.log(r.credited ? `✅ Deposit ${Number(bal.paws).toFixed(2)} PAWS masuk ke game (tx ${r.txHash.slice(0, 10)}…)` : `⏳ Deposit terkirim, menunggu konfirmasi (tx ${r.txHash.slice(0, 10)}…)`, 'important');
+      await this.refresh();
+    }
+    return r;
   }
 
   // ---------- rewards

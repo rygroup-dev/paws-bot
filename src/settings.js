@@ -24,6 +24,8 @@ export const DEFAULTS = {
   autoRecruit: true,      // use free recruit credits / tickets
   autoUpgradeBuildings: false, // Auto Grow: spend $PAWS on station / land / house upgrades
   autoBuyCats: false,     // Auto Grow: buy a market cat when an active-cat slot is empty
+  autoDepositWallet: false, // move $PAWS sitting in the wallet into the game (on-chain, ETH gas)
+  autoDepositMin: 10,     // only when the wallet holds at least this many $PAWS
   dropOverflow: true,     // when storage is full, still claim (losing the overflow) instead of stalling
   maxSpendPerAction: 1000,// $PAWS ceiling for any single automatic purchase
   keepPaws: 0,            // $PAWS reserve automatic spending never touches

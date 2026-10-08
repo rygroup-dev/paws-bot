@@ -213,6 +213,31 @@ export class TelegramUI {
     return `${el.eligible ? '✅ <b>Eligible reward</b>' : '⛔ <b>Belum eligible reward</b>'}\n${rows.join('\n')}`;
   }
 
+  // Everything with a timer that is not a shift: buildings, House, land, cat level-up prep,
+  // recruits, permits, crafts, naps/rests. Times from the server's completesAt/readyAt fields.
+  timersSection() {
+    const st = this.state();
+    const p = st.property;
+    if (!p) return '';
+    const now = this.g.c.now();
+    const left = (iso) => (iso ? (new Date(iso).getTime() <= now ? '✅ siap' : until(iso, now)) : '-');
+    const rows = [];
+    for (const b of p.buildings ?? []) {
+      if (b.status === 'ACTIVE' || b.type === 'HOUSE') continue;
+      const what = { UPGRADING: `upgrade → L${b.level + 1}`, CONSTRUCTING: 'dibangun', REPAIRING: 'diperbaiki' }[b.status] ?? b.status;
+      rows.push(`🏗️ ${esc(b.name)} ${what} · ${b.secondsRemaining > 0 ? dur(b.secondsRemaining) : '✅ siap'}`);
+    }
+    if (p.house?.upgrade) rows.push(`🏠 House → L${p.house.upgrade.toLevel} · ${left(p.house.upgrade.completesAt)}`);
+    if (p.expansion) rows.push(`🏡 Lahan → tier ${p.expansion.toTier} · ${left(p.expansion.completesAt)}`);
+    const catName = (id) => (st.cats ?? []).find((c) => c.id === id)?.name ?? 'kucing';
+    for (const a of st.upgrades?.attempts ?? []) if (!a.resolvedAt && a.status === 'PREPARING') rows.push(`📈 ${esc(catName(a.catId))} level up L${a.fromLevel}→${a.targetLevel} (${a.chance.finalBps / 100}%) · ${left(a.readyAt)}`);
+    for (const r of st.recruit?.active ?? []) if (!r.claimedAt) rows.push(`🍺 Rekrut kucing · ${left(r.readyAt)}`);
+    for (const x of st.permits?.active ?? []) rows.push(`📜 Permit · ${left(x.completesAt ?? x.readyAt)}`);
+    for (const x of st.permits?.crafts ?? []) rows.push(`🔨 Craft ${esc(x.target ?? '')} · ${left(x.completesAt ?? x.readyAt)}`);
+    for (const x of [...(p.house?.quickNap?.active ?? []), ...(p.house?.freeRest?.active ?? [])]) rows.push(`😴 ${esc(x.catName)} istirahat · ${x.ready ? '✅ siap' : left(x.completesAt)}`);
+    return rows.length ? `\n⏳ <b>Sedang berjalan</b>\n${rows.join('\n')}\n` : '';
+  }
+
   // Requirement items from the server (quotes, upgrades, land) as ✅/❌ have/need lines.
   reqLines(items, indent = '   ') {
     return (items ?? []).map((i) => `${indent}${i.met ? '✅' : '❌'} ${esc(i.label)} ${num(i.have, 0)}/${num(i.need, 0)}${i.met ? '' : ` (kurang ${num(i.missing, 0)})`}`).join('\n');
@@ -262,7 +287,7 @@ ${resLine}
 
 🐱 <b>Kucing</b> (${p?.activeCats?.working ?? 0}/${p?.activeCats?.limit ?? '-'} kerja)
 ${catLines || '-'}
-${tut}
+${this.timersSection()}${tut}
 ${this.e.needed?.size ? `🎯 Bot sedang mengumpulkan: ${[...this.e.needed].map(([k, v]) => `${RES_ICON[k] ?? ''}${esc(k)} ${num(v, 0)}`).join(', ')} (untuk level up/upgrade)\n` : ''}🎁 Ronde #${ep?.epochNumber ?? '-'} sisa ${ep ? until(ep.endsAt, now) : '-'} · poin saya ${num(myPts)}
 ${elig}
 
@@ -766,16 +791,18 @@ ${subs || 'Belum ada submission.'}`,
     const ract = (rc.active ?? []).map((r) => `• rekrut ${esc(r.status)} ${until(r.readyAt, now)}`).join('\n');
     const frag = pm.wallet.fragments.map((f) => `${f.selected ? '🎯' : '·'} ${esc(f.name)} ${f.balance}/${f.threshold}`).join('  ');
     const rows = [];
-    rows.push([this.btn(`📜 Beli permit (${num(pm.cost.cat)} PAWS)${pm.canStart ? '' : ' ⛔'}`, this.confirm(`Ajukan Business Permit (1 jam) seharga ${num(pm.cost.cat)} $PAWS + ${esc(JSON.stringify(pm.cost.resources))}?\nPeluang: ${esc(pm.table.filter((t) => !t.locked).map((t) => `${t.name} ${(t.weightWithLuckBps / 100).toFixed(1)}%`).join(', '))}`, 'Permit diajukan', () => this.g.buyPermit(false, pm.cost.cat), this.permitScreen))]);
+    rows.push([this.btn(`📜 Gacha STASIUN / permit (${num(pm.cost.cat)} PAWS)${pm.canStart ? '' : ' ⛔'}`, this.confirm(`Ajukan Business Permit (1 jam) seharga ${num(pm.cost.cat)} $PAWS + ${esc(JSON.stringify(pm.cost.resources))}?\nPeluang: ${esc(pm.table.filter((t) => !t.locked).map((t) => `${t.name} ${(t.weightWithLuckBps / 100).toFixed(1)}%`).join(', '))}`, 'Permit diajukan', () => this.g.buyPermit(false, pm.cost.cat), this.permitScreen))]);
     if (pm.wallet.permitTickets > 0) rows.push([this.btn(`🎟 Permit pakai ticket (${pm.wallet.permitTickets})`, this.doThen('Permit (ticket)', () => this.g.buyPermit(true, '0'), this.permitScreen))]);
-    rows.push(pm.wallet.fragments.filter((f) => f.enabled).map((f) => this.btn(`🎯 ${f.name}`, this.doThen(`Target fragment ${f.name}`, () => this.g.permitTarget(f.type), this.permitScreen))));
+    rows.push(pm.wallet.fragments.filter((f) => f.enabled).map((f) => this.btn(`🎯 Target ${f.name}${f.selected ? ' ✓' : ''}`, this.doThen(`Target fragment ${f.name}`, () => this.g.permitTarget(f.type), this.permitScreen))));
     const tgt = pm.wallet.fragments.find((f) => f.selected);
     if (tgt && tgt.balance >= tgt.threshold) rows.push([this.btn(`🔨 Craft ${tgt.name}`, this.confirm(`Craft ${esc(tgt.name)} seharga ${num(tgt.craft.catCost)} PAWS?`, 'Craft dimulai', () => this.g.craft({ target: tgt.type, maxCatCost: tgt.craft.catCost }), this.permitScreen))]);
-    rows.push([this.btn(`🍺 Rekrut kucing (${num(rc.costs.cat)} PAWS)${rc.canStart ? '' : ' ⛔'}`, this.confirm(`Rekrut kucing baru seharga ${num(rc.costs.cat)} $PAWS + ${esc(JSON.stringify(rc.costs.resources))} (${dur(rc.durationSeconds)})?`, 'Rekrut dimulai', () => this.g.recruit(false, rc.costs.cat), this.permitScreen))]);
+    rows.push([this.btn(`🍺 Gacha KUCING / rekrut (${num(rc.costs.cat)} PAWS)${rc.canStart ? '' : ' ⛔'}`, this.confirm(`Rekrut kucing baru seharga ${num(rc.costs.cat)} $PAWS + ${esc(JSON.stringify(rc.costs.resources))} (${dur(rc.durationSeconds)})?`, 'Rekrut dimulai', () => this.g.recruit(false, rc.costs.cat), this.permitScreen))]);
     if (rc.canStartWithTicket) rows.push([this.btn(`🎟 Rekrut pakai ticket (${rc.tickets})`, this.doThen('Rekrut (ticket)', () => this.g.recruit(true, '0'), this.permitScreen))]);
     rows.push([this.btn('✅ Claim semua yang siap', async () => { await this.e.claimPermits(); await this.e.recruiting(false, false); await this.e.deployStored(); this.flash = '✅ Dicek & diklaim'; return this.permitScreen; })]);
     return {
-      text: `${this.takeFlash()}📜 <b>Permit Office</b> · ${pm.plot.name} (maks ${pm.plot.maxRarity})
+      text: `${this.takeFlash()}<i>🍺 Rekrut = gacha kucing · 📜 Permit = gacha stasiun (bangunan) · 🎯 Target = pilih blueprint yang fragment-nya dikumpulkan (setiap permit yang meleset +1 fragment; kalau penuh bisa craft stasiun itu). GPU Farm butuh lahan tier 4, Trading Post &amp; Sherwood Exchange tier 3.</i>
+
+📜 <b>Permit Office</b> · ${pm.plot.name} (maks ${pm.plot.maxRarity})
 Stasiun ${pm.stations.deployed}/${pm.stations.slots} · ticket permit ${pm.wallet.permitTickets} · ticket kucing ${pm.wallet.catTickets}
 ${pm.canStart ? '✅ bisa ajukan' : `⛔ ${esc(blockers(pm.blockers))}`}
 Fragment: ${frag}
@@ -836,7 +863,7 @@ Notifikasi: ${s.get('notify')}`,
         [tg('autoPermits', 'Permit & stasiun'), tg('autoRecruit', 'Rekrut gratis')],
         [tg('autoUpgradeBuildings', 'Auto Grow (PAWS)'), tg('dropOverflow', 'Claim walau gudang penuh')],
         [tg('autoCollectOnchain', 'Collect reward on-chain'), tg('fastActivity', 'Shift 10m s/d eligible')],
-        [tg('autoBuyCats', 'Beli kucing market (slot kosong)')],
+        [tg('autoBuyCats', 'Beli kucing market (slot kosong)'), tg('autoDepositWallet', 'Auto deposit wallet → game')],
         [cycle('shiftMode', SHIFT_MODES, '⏱ Shift'), cycle('maxShift', ['60', '120', '240', '480'], 'Maks')],
         [cycle('prefer', ['points', 'resources'], '🎯 Prioritas'), cycle('notify', NOTIFY_MODES, '🔔')],
         [this.btn('💸 Ubah maks belanja', this.ask('Maksimal $PAWS per aksi otomatis (contoh 500):', async (t) => { s.set('maxSpendPerAction', Math.max(0, Number(t) || 0)); return this.settingsScreen; })),
