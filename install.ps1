@@ -82,6 +82,19 @@
     $sh.Save()
     Write-Host "[ok] shortcut 'Paws Bot' di Desktop" -ForegroundColor Green
   } catch {}
+  # start with Windows (minimized), so a reboot or power cut doesn't stop the farm
+  if (-not $env:PAWS_NO_AUTOSTART) {
+    try {
+      $st = Join-Path ([Environment]::GetFolderPath('Startup')) 'Paws Bot.lnk'
+      $sh = (New-Object -ComObject WScript.Shell).CreateShortcut($st)
+      $sh.TargetPath = Join-Path $env:WINDIR 'System32\cmd.exe'
+      $sh.Arguments = "/k title Paws Bot && `"$dir\run.cmd`""
+      $sh.WorkingDirectory = $dir
+      $sh.WindowStyle = 7
+      $sh.Save()
+      Write-Host "[ok] bot otomatis jalan saat Windows login (hapus 'Paws Bot' di shell:startup untuk mematikan)" -ForegroundColor Green
+    } catch {}
+  }
   Write-Host "`nSelesai! Bot dijalankan di jendela baru. Kirim /menu ke bot Telegram kamu." -ForegroundColor Yellow
   Write-Host "Akun baru: jendela Edge/Chrome kecil muncul sekali untuk captcha, centang kotaknya."
   if (-not $env:PAWS_NO_START) { Start-Process cmd.exe -ArgumentList '/k', "title Paws Bot && `"$dir\run.cmd`"" -WorkingDirectory $dir }

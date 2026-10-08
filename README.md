@@ -30,6 +30,8 @@ The installer downloads the bot, a portable Node.js if you don't have Node 20+, 
 
 Run the installer again to update. It keeps your `.env` and `data/`.
 
+On Windows the installer also adds a **Startup** shortcut, so the bot starts minimized every time you log in (a reboot or power cut doesn't stop the farm; set `PAWS_NO_AUTOSTART=1` before installing to skip it). On Linux the systemd service restarts it automatically.
+
 ### Manual install
 ```bash
 git clone https://github.com/rygroup-dev/paws-bot && cd paws-bot
@@ -58,7 +60,11 @@ The game asks for a Cloudflare human check the first time a wallet signs in. The
 | Claims | shifts, naps/rests, cat upgrades, station/house upgrades, land expansion, permits, crafts, recycling, recruits, rewards, plus the **on-chain collect** of stock and $PAWS rewards |
 | Stations | claims the starter permit and places every new station on a free tile |
 | Recruiting | uses free recruit credits and tickets |
-| Auto Grow (optional) | fills empty cat slots by buying the cheapest matching cat on the market, expands land, upgrades point stations (+15% output per level), upgrades the House when the next land tier needs it. Saves for the best target instead of wasting $PAWS |
+| Auto Grow (optional) | next land tier first (House level it needs, then the land), then point stations (+15% output per level). Optionally buys the cheapest matching market cat for an empty slot. Saves for the best target instead of wasting $PAWS |
+| Materials | when a level up, the land or an upgrade is short of WOOD / ORE / FOOD, an idle cat goes to the station that makes it, on a shift just long enough to cover what is missing |
+| Auto deposit (optional) | moves $PAWS sitting in the wallet (e.g. bought outside the bot) into the game |
+| Safety | one bot per folder (lock refreshed every minute; a stale lock after a crash is ignored), network errors retried, RPC fallback |
+| Log | every action in Telegram `/log` and in `data/bot.log`, with an hourly status line |
 
 Every spend has a per-action ceiling and an optional reserve that is never touched. Everything can be switched on/off in ⚙️ Setting.
 
@@ -82,7 +88,7 @@ Every spend has a per-action ceiling and an optional reserve that is never touch
 Only the chat in `TELEGRAM_CHAT_ID` can control the bot.
 
 ### Dashboard
-Shows the account, $PAWS, resources/storage, every cat (level, stamina, job + countdown), the reward round, the eligibility status and bot stats.
+Shows the account, $PAWS, resources/storage, every cat (level, stamina, job + countdown), **⏳ everything running** (station/House upgrades, land expansion, level-up prep, recruits, permits, crafts, rests, each with its countdown), materials the bot is gathering, the reward round, the eligibility status and bot stats.
 
 | Button | Does |
 | --- | --- |
@@ -141,7 +147,7 @@ Game balance, on-chain ETH / PAWS / USDG, live $PAWS price, deposits/withdrawals
 ### More
 | Menu | Does |
 | --- | --- |
-| 📜 Permit & Rekrut | buy a Business Permit (odds shown), use tickets, choose fragment target, craft, recruit a cat, claim all |
+| 📜 Permit & Rekrut | 🍺 **cat gacha** (recruit: live odds, pity, expected market value), 📜 **station gacha** (Business Permit, odds shown), 🎯 fragment target (which blueprint the permits' fragments go to: GPU Farm / Trading Post / Sherwood Exchange), craft, tickets, claim all |
 | 👑 Membership | monthly pass (USDG, 30 days): members share a members-only pool. Shows last round's median payout. One-tap buy |
 | 🤝 Referral | code, link, 📤 share, friends and earnings, ✏️ change your code |
 | 🔒 Stake | lock $PAWS (cuts build/recruit time, counts as "spend or stake" for eligibility), unstake when unlocked |
@@ -149,7 +155,7 @@ Game balance, on-chain ETH / PAWS / USDG, live $PAWS price, deposits/withdrawals
 | 🤝 Trade P2P | offer $PAWS for another player's cat, approve or cancel trades |
 | 🎓 Tutorial | progress, auto on/off, skip |
 | 🏆 Leaderboard | top players per board and your rank |
-| ⚙️ Setting | every automation toggle, shift mode (auto/10…480), max shift, priority (points/resources), notifications, max spend per action, $PAWS reserve, repair threshold |
+| ⚙️ Setting | every automation toggle (incl. Auto Grow, buy market cats, auto deposit, collect on-chain), shift mode (auto/10…480), max shift, priority (points/resources), notifications, **max spend per action** (a per-purchase cap, not a daily budget), **$PAWS reserve** the bot never spends, repair threshold |
 | 📋 Log | last 25 actions |
 | 💡 Strategi Cuan | how to earn the most (below) |
 
