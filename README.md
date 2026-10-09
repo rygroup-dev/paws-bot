@@ -60,8 +60,11 @@ The game asks for a Cloudflare human check the first time a wallet signs in. The
 | Claims | shifts, naps/rests, cat upgrades, station/house upgrades, land expansion, permits, crafts, recycling, recruits, rewards, plus the **on-chain collect** of stock and $PAWS rewards |
 | Stations | claims the starter permit and places every new station on a free tile |
 | Recruiting | uses free recruit credits and tickets |
-| Auto Grow (optional) | next land tier first (House level it needs, then the land), then point stations (+15% output per level). Optionally buys the cheapest matching market cat for an empty slot. Saves for the best target instead of wasting $PAWS |
-| Materials | when a level up, the land or an upgrade is short of WOOD / ORE / FOOD, an idle cat goes to the station that makes it, on a shift just long enough to cover what is missing |
+| Auto Grow (optional) | the next land tier (and the House level it needs) as soon as it can be paid; until then the PAWS go into point-station levels (+15% output for every cat there), best pool per PAWS first, rather than sitting idle. Optionally buys the cheapest matching market cat for an empty slot |
+| Materials | when a level up, the land or an upgrade is short of WOOD / ORE / FOOD, the idle cat that loses the fewest points goes to the station that makes it, on a shift just long enough to cover what is missing. The best producers stay on point stations |
+| Waiting for a slot | a cat that can earn points but finds every point slot taken works elsewhere only until the first point slot frees up, instead of 8h at a pointless station |
+| Level-up order | free levels first, then the strongest cats (highest productivity). Paid levels above the land's max effective level are skipped, they add no output until the land grows |
+| Station slots (optional) | files a Business Permit when a station slot is empty, so every working cat earns points |
 | Auto deposit (optional) | moves $PAWS sitting in the wallet (e.g. bought outside the bot) into the game |
 | Safety | one bot per folder (lock refreshed every minute; a stale lock after a crash is ignored), network errors retried, RPC fallback |
 | Log | every action in Telegram `/log` and in `data/bot.log`, with an hourly status line |

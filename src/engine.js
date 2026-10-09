@@ -58,6 +58,7 @@ export class Engine {
     if (!this.cfg) this.cfg = (await this.g.config()).config;
     const me = await this.g.c.ensureSession();
     const st = { me, at: Date.now() };
+    this.spent = 0;   // the fresh balance already includes earlier spending
     if (!me.onboarding?.needsUsername) {
       const [property, tutorial] = await Promise.all([
         this.g.property(),
@@ -79,7 +80,8 @@ export class Engine {
     return v;
   }
 
-  balance() { return n(this.state.me?.balances?.cat); }
+  // Game balance minus what this tick already spent (the snapshot is only refreshed per tick).
+  balance() { return n(this.state.me?.balances?.cat) - (this.spent ?? 0); }
   canSpend(cost) { return n(cost) <= this.balance() - n(this.s.get('keepPaws')) && n(cost) <= this.s.get('maxSpendPerAction'); }
 
   // ---------- loop
@@ -279,7 +281,14 @@ export class Engine {
   }
 
   // ---------- level ups
+  // Production weight of a cat: its productivity stat drives output (base 80% + up to 50% from
+  // productivity), so the strongest cats get the PAWS first.
+  catPower(cat) {
+    return (n(this.cfg.production.productivityBaseBps) + (n(this.cfg.production.productivityScaleBps) * n(cat.stats?.productivity)) / 100) / 10000;
+  }
+
   async levelUps() {
+    const cands = [];
     for (const cat of this.state.cats ?? []) {
       // canAttemptUpgrade is also false when materials are short, so go by XP and ask for a
       // quote: its requirements say exactly what is missing.
@@ -298,10 +307,24 @@ export class Engine {
       // (e.g. 150 @80% = 187 per success vs 375 @100%); a failure keeps level and XP.
       const best = [...q.stops].sort((a, b) => n(a.catCost) / a.chanceBps - n(b.catCost) / b.chanceBps || b.chanceBps - a.chanceBps)[0];
       const cost = n(best.catCost);
+      // Levels above the land's max effective level add nothing to output (gain.capped):
+      // don't pay for them until the land grows.
+      if (cost > 0 && q.gain?.capped) {
+        this.logOnce(`cap:${cat.id}`, `⏸️ Level up ${cat.name} ditahan: L${q.targetLevel} di atas batas efektif lahan (L${this.state.property?.maxEffectiveLevel}), tidak menambah produksi`);
+        continue;
+      }
+      cands.push({ cat, q, best, cost });
+    }
+    // Free levels first, then the strongest cats (most output gained per level).
+    cands.sort((a, b) => (a.cost > 0) - (b.cost > 0) || this.catPower(b.cat) - this.catPower(a.cat));
+    for (const { cat, q, best, cost } of cands) {
       if (cost > 0 && !(this.s.get('levelUpSpendPaws') && this.canSpend(cost))) continue;
       const pct = Math.round(best.chanceBps / 100);
       const r = await this.try(`level up ${cat.name}`, () => this.g.startUpgrade(cat.id, pct, best.catCost));
-      if (r) this.log(`📈 Level up ${cat.name} → L${q.targetLevel} dimulai (peluang ${pct}%, biaya ${cost} PAWS)`);
+      if (r) {
+        this.spent += cost;
+        this.log(`📈 Level up ${cat.name} → L${q.targetLevel} dimulai (peluang ${pct}%, biaya ${cost} PAWS)`);
+      }
     }
   }
 
@@ -500,22 +523,48 @@ export class Engine {
     const pick = ok.find((l) => wanted.has(l.cat.profession)) ?? ok[0];
     if (!pick) return false;
     const r = await this.try(`beli kucing ${pick.cat.name}`, () => this.g.buyListing(pick.id));
+    if (r) this.spent += n(pick.price);
     if (r) this.log(`🐱 Beli kucing ${pick.cat.name} (${pick.cat.rarity} ${pick.cat.profession} L${pick.cat.level}) seharga ${n(pick.price)} PAWS`, 'important');
     return !!r;
+  }
+
+  // An empty station slot means a cat works somewhere without points. A Business Permit fills it
+  // (every station a permit can roll earns points), so file one when the slot is free.
+  async fillStationSlots() {
+    const pm = this.state.permits ?? (await this.try('permits', () => this.g.permits(), { quiet: true }));
+    if (!pm || pm.stations.deployed + (pm.stations.stored ?? 0) >= pm.stations.slots) return false;
+    if ((pm.active ?? []).length || pm.concurrency?.active >= pm.concurrency?.max) return false;
+    if (!pm.canStart) { this.noteMissing(pm.costRequirements?.items); return false; }
+    if (!this.canSpend(pm.cost.cat)) return false;
+    const r = await this.try('permit', () => this.g.buyPermit(false, pm.cost.cat));
+    if (!r) return false;
+    this.spent += n(pm.cost.cat);
+    this.cache.permits = null;
+    this.log(`📜 Permit diajukan untuk slot stasiun kosong (${n(pm.cost.cat)} PAWS, ${pm.hours} jam)`, 'important');
+    return true;
   }
 
   async grow() {
     const p = this.state.property;
     if (this.s.get('autoBuyCats') && (await this.fillCatSlots())) return;
+    if (this.s.get('autoFillStations') && (await this.fillStationSlots())) return;
     const queue = p.propertyQueue ?? { used: 0, slots: 1 };
     if (queue.used >= queue.slots || p.expansion) return;
     const plan = this.growPlan();
-    const top = plan[0];
-    // Gather materials for the top target, and for the House + land step together.
-    for (const x of plan.filter((x, i) => !x.ready && (i === 0 || x.prio <= 0))) this.noteMissing(x.reqs);
-    if (!top || !top.ready || !this.canSpend(top.cost)) return;   // save up for the best target
-    const r = await this.try(`grow ${top.name}`, () => (top.kind === 'land' ? this.g.expand(top.cost) : this.g.upgradeBuilding(top.id, top.cost)));
-    if (r) this.log(`🏗️ Upgrade ${top.name} dimulai (${n(top.cost)} PAWS)`, 'important');
+    // Gather materials for the land step (House + land) and the first station upgrade meanwhile.
+    const firstStation = plan.find((x) => x.prio === 1);
+    for (const x of plan.filter((x) => !x.ready && (x.prio <= 0 || x === firstStation))) this.noteMissing(x.reqs);
+    // Land (and the House level it needs) when it can be paid now. Otherwise don't sit on the
+    // PAWS waiting for it: a point-station level (+15% output for every cat there) pays back far
+    // sooner than saving thousands for the next tier.
+    const land = plan.find((x) => x.prio <= 0 && x.ready && this.canSpend(x.cost));
+    const pick = land ?? plan.filter((x) => x.prio === 1 && x.ready && this.canSpend(x.cost)).sort((a, b) => (b.value ?? 0) / n(b.cost) - (a.value ?? 0) / n(a.cost))[0];
+    if (!pick) return;
+    const r = await this.try(`grow ${pick.name}`, () => (pick.kind === 'land' ? this.g.expand(pick.cost) : this.g.upgradeBuilding(pick.id, pick.cost)));
+    if (r) {
+      this.spent += n(pick.cost);
+      this.log(`🏗️ Upgrade ${pick.name} dimulai (${n(pick.cost)} PAWS)`, 'important');
+    }
   }
 
   // ---------- farming
@@ -566,6 +615,17 @@ export class Engine {
       .filter((j) => j.durationMinutes <= Math.max(this.s.get('minShift'), GATHER_OFF_MAX))
       .map((j) => (p.buildings ?? []).find((b) => b.id === j.buildingId)?.producesResource)
       .filter((r) => r && this.needed?.has(r)));
+    // What each idle cat would earn on its best point station (weighted points per hour). The cat
+    // that loses the least by leaving the point stations is the one sent to gather materials.
+    const pointValue = (b, o) => {
+      const hours = o.projection?.hours || probeMinutes / 60;
+      return (n(o.projection?.gamePoints) / hours) * (b.pointsCategory ? (vpp.get(b.pointsCategory) ?? avgV) / avgV : 0);
+    };
+    const bestPoints = new Map();
+    for (const b of stations) {
+      if (!b.pointsCategory) continue;
+      for (const o of rankings.get(b.id)?.options ?? []) if (!o.blocker) bestPoints.set(o.catId, Math.max(bestPoints.get(o.catId) ?? 0, pointValue(b, o)));
+    }
     while (idle.length && capacity > 0) {
       let best = null;
       for (const b of stations) {
@@ -583,9 +643,9 @@ export class Engine {
           let score = (preferPoints ? pts * weight * 100 : pts * weight * 5) + resPerHour + (o.professionMatch ? 1 : 0);
           // A material we are short of (blocking a level up or upgrade) beats points for now.
           const forNeed = b.producesResource && this.needed?.get(b.producesResource) > 0 && !gathering.has(b.producesResource);
-          // The cat whose profession makes this material gathers it (1.25x output); another cat
-          // only fills in when no such cat is idle.
-          if (forNeed) score += 1e6 + (o.professionMatch ? 1e5 : 0) + resPerHour * 100;
+          // Gathering goes to the idle cat that gives up the fewest points; a matching profession
+          // (1.25x material) only breaks near-ties, it never pulls the best producer off points.
+          if (forNeed) score += 1e6 - (bestPoints.get(cat.id) ?? 0) * 1000 + (o.professionMatch ? 50 : 0) + resPerHour;
           // Gather with the shortest shift that covers what is missing at this station's rate
           // (10 min still earns points), never longer than the cat could otherwise work.
           // A cat outside its profession gathers at most GATHER_OFF_MAX minutes, so it is soon
@@ -601,6 +661,18 @@ export class Engine {
         }
       }
       if (!best) break;
+      // A cat that can earn points but finds every point slot taken should not sit 8h at a
+      // pointless station: work only until the first point slot frees up, then move over.
+      if (!best.b.pointsCategory && !best.forNeed && (bestPoints.get(best.cat.id) ?? 0) > 0) {
+        const now = this.g.c.now();
+        const pointBusy = (p.activeJobs ?? []).filter((j) => (p.buildings ?? []).find((b) => b.id === j.buildingId)?.pointsCategory);
+        const freeIn = Math.min(...pointBusy.map((j) => (new Date(j.endsAt).getTime() - now) / 60000));
+        if (Number.isFinite(freeIn)) {
+          const fits = this.durations().filter((d) => d >= this.s.get('minShift') && d <= best.minutes);
+          const m = [...fits].reverse().find((d) => d <= Math.max(freeIn, this.s.get('minShift'))) ?? fits[0];
+          if (m && m < best.minutes) best.minutes = m;
+        }
+      }
       const r = await this.try(`start job ${best.cat.name}`, () => this.g.startJob(best.cat.id, best.b.id, best.minutes));
       idle = idle.filter((c) => c.id !== best.cat.id);
       if (r) {
