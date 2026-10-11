@@ -107,8 +107,14 @@ export class TelegramUI {
           this.handle(u).catch((e) => console.error('TG handler:', e.message));
         }
       } catch (e) {
-        console.error(e.message);
-        await new Promise((r) => setTimeout(r, 5000));
+        // Telegram's long poll now and then answers 502/504/429 or the network blips. That only
+        // delays reading taps; the farm keeps running. Retry quietly and note it in the log at
+        // most once an hour instead of printing every hiccup to the console.
+        const transient = /Bad Gateway|Gateway Timeout|Too Many Requests|Service Unavailable|fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket/i.test(e.message);
+        this.pollErrors = (this.pollErrors ?? 0) + 1;
+        if (transient) this.e.logOnce('tg-poll', `📡 Telegram sempat tidak merespons (${e.message.replace(/^Telegram getUpdates: /, '')}), dicoba ulang otomatis. Farming tetap jalan.`);
+        else console.error(e.message);
+        await new Promise((r) => setTimeout(r, transient ? 3000 : 5000));
       }
       setImmediate(poll);
     };
